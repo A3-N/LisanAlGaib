@@ -51,6 +51,11 @@ if command -v nvim >/dev/null 2>&1 && [ -f "$lisan_chadrc" ] && grep -Eq 'keys =
     cp "$nvim_template/lua/plugins/lisan-file-browser.lua" /home/fremen/.config/nvim/lua/plugins/lisan-file-browser.lua
     lisan_nvchad_sync=1
   fi
+  if [ ! -f /home/fremen/.config/nvim/lua/plugins/lisan-cursor.lua ] || \
+    ! cmp -s "$nvim_template/lua/plugins/lisan-cursor.lua" /home/fremen/.config/nvim/lua/plugins/lisan-cursor.lua; then
+    cp "$nvim_template/lua/plugins/lisan-cursor.lua" /home/fremen/.config/nvim/lua/plugins/lisan-cursor.lua
+    lisan_nvchad_sync=1
+  fi
 
   cp "$nvim_template/lua/lisan/header.lua" /home/fremen/.config/nvim/lua/lisan/header.lua
 
@@ -63,7 +68,9 @@ if command -v nvim >/dev/null 2>&1 && [ -f "$lisan_chadrc" ] && grep -Eq 'keys =
     -e "/keys = \"ff\"/c\\    { txt = \"󰱼  Open File\", keys = \"ff\", cmd = \"lua require('lisan.picker').open_file()\" }," \
     "$lisan_chadrc"
 
-  if [ ! -d /home/fremen/.local/share/nvim/lazy/telescope-file-browser.nvim ]; then
+  if [ ! -d /home/fremen/.local/share/nvim/lazy/telescope-file-browser.nvim ] || \
+    [ ! -d /home/fremen/.local/share/nvim/lazy/SmoothCursor.nvim ] || \
+    [ ! -d /home/fremen/.local/share/nvim/lazy/smear-cursor.nvim ]; then
     lisan_nvchad_sync=1
   fi
 fi

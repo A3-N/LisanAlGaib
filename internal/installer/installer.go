@@ -354,6 +354,7 @@ func syncLisanNvimAssets(sourceRoot, nvimTarget string) error {
 	assets := []struct{ source, destination string }{
 		{filepath.Join(sourceRoot, "docker", "nvim", "lua", "lisan", "header.lua"), filepath.Join(nvimTarget, "lua", "lisan", "header.lua")},
 		{filepath.Join(sourceRoot, "docker", "nvim", "lua", "lisan", "picker.lua"), filepath.Join(nvimTarget, "lua", "lisan", "picker.lua")},
+		{filepath.Join(sourceRoot, "docker", "nvim", "lua", "plugins", "lisan-cursor.lua"), filepath.Join(nvimTarget, "lua", "plugins", "lisan-cursor.lua")},
 		{filepath.Join(sourceRoot, "docker", "nvim", "lua", "plugins", "lisan-file-browser.lua"), filepath.Join(nvimTarget, "lua", "plugins", "lisan-file-browser.lua")},
 	}
 	for _, asset := range assets {

@@ -47,6 +47,11 @@ func TestSyncLisanNvimAssetsRefreshesManagedModules(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(target, "lua", "plugins", "lisan-file-browser.lua")); err != nil {
 		t.Fatalf("NvChad file-browser plugin declaration was not refreshed: %v", err)
 	}
+	if cursor, err := os.ReadFile(filepath.Join(target, "lua", "plugins", "lisan-cursor.lua")); err != nil {
+		t.Fatalf("NvChad cursor plugin declaration was not refreshed: %v", err)
+	} else if !strings.Contains(string(cursor), "SmoothCursor.nvim") || !strings.Contains(string(cursor), "smear-cursor.nvim") {
+		t.Fatal("NvChad cursor plugin declaration is incomplete")
+	}
 }
 
 func TestUserAssetsFollowActiveProfile(t *testing.T) {

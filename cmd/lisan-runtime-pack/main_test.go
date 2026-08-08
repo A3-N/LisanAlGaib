@@ -37,7 +37,10 @@ func TestPackIsDeterministicAndExcludesBuildOnlySource(t *testing.T) {
 	}
 
 	files := archiveFiles(t, firstData)
-	for _, required := range []string{".dockerignore", "Dockerfile", "cmd/lisan/main.go", "docker/lisan-entrypoint"} {
+	for _, required := range []string{
+		".dockerignore", "Dockerfile", "cmd/lisan/main.go", "docker/lisan-entrypoint",
+		"docker/nvim/lua/plugins/lisan-cursor.lua",
+	} {
 		if !files[required] {
 			t.Fatalf("runtime archive is missing %s", required)
 		}

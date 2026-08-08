@@ -259,8 +259,11 @@ Protocol, manifest, lifecycle, and authoring details are in
 
 Files embeds NvChad at the full main-pane size. Its dashboard can choose a
 workspace, find/recent files, search text, and show mappings. `Ctrl-N` remains
-NvChad's NvimTree toggle. Docker Files can see only the Usul home; Wormsign can
-see the selected host workspace.
+NvChad's NvimTree toggle. Normal cursor movement uses a text-mode smear; larger
+vertical jumps and scrolling also show SmoothCursor's default trailing marker.
+Floating/plugin windows avoid the extra marker, and Neovim terminal-mode
+smearing is disabled. Docker Files can see only the Usul home; Wormsign can see
+the selected host workspace.
 
 The persistent Docker home includes one instruction workspace per agent:
 

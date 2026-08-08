@@ -1,6 +1,7 @@
 package launcher
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -92,6 +93,56 @@ func TestDockerNvChadSelectionSurvivesAnExistingHomeVolume(t *testing.T) {
 	guard := `if [ "${LISAN_NVCHAD:-0}" = 1 ] && [ ! -e /home/fremen/.config/nvim ]`
 	if !strings.Contains(string(entrypoint), guard) || !strings.Contains(string(entrypoint), `cp -a "$nvim_template/." /home/fremen/.config/nvim/`) {
 		t.Fatal("entrypoint does not safely seed NvChad into an existing home volume")
+	}
+}
+
+func TestNvChadCursorAnimationsArePinnedAndSynced(t *testing.T) {
+	root := filepath.Join("..", "..")
+	plugin, err := os.ReadFile(filepath.Join(root, "docker", "nvim", "lua", "plugins", "lisan-cursor.lua"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration := string(plugin)
+	for _, expected := range []string{
+		`"gen740/SmoothCursor.nvim"`, `commit = "12518b284e1e3f7c6c703b346815968e1620bee2"`,
+		`type = "default"`, `threshold = 3`,
+		`"sphamba/smear-cursor.nvim"`, `commit = "9e9378d6ee34bb3782e0e8c63d9ec8ca618b479b"`,
+		`cursor_color = "none"`, `smear_terminal_mode = false`,
+	} {
+		if !strings.Contains(configuration, expected) {
+			t.Fatalf("NvChad cursor configuration omits %q", expected)
+		}
+	}
+
+	lockData, err := os.ReadFile(filepath.Join(root, "docker", "nvim", "lazy-lock.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lock map[string]struct {
+		Commit string `json:"commit"`
+	}
+	if err := json.Unmarshal(lockData, &lock); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"SmoothCursor.nvim", "smear-cursor.nvim"} {
+		if len(lock[name].Commit) != 40 {
+			t.Fatalf("NvChad cursor plugin %s is not commit-pinned", name)
+		}
+	}
+
+	entrypoint, err := os.ReadFile(filepath.Join(root, "docker", "lisan-entrypoint"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := string(entrypoint)
+	for _, expected := range []string{
+		"lua/plugins/lisan-cursor.lua",
+		"lazy/SmoothCursor.nvim",
+		"lazy/smear-cursor.nvim",
+	} {
+		if !strings.Contains(migration, expected) {
+			t.Fatalf("persistent NvChad migration omits %q", expected)
+		}
 	}
 }
 
