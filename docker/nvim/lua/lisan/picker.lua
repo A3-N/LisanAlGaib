@@ -6,6 +6,22 @@ local function current_directory()
   return uv.cwd() or uv.os_homedir() or vim.fn.expand "~"
 end
 
+local function filesystem_root(path)
+  if vim.fn.has "win32" ~= 1 then
+    return "/"
+  end
+
+  local absolute = vim.fn.fnamemodify(path, ":p")
+  local drive = absolute:match "^([A-Za-z]:)[/\\]"
+  if drive then
+    return drive .. "\\"
+  end
+
+  -- Preserve the share root when Neovim was launched from a UNC path.
+  local share = absolute:match "^([/\\][/\\][^/\\]+[/\\][^/\\]+)"
+  return share or absolute
+end
+
 local function file_browser()
   require("lazy").load { plugins = { "telescope-file-browser.nvim" } }
 
@@ -35,6 +51,25 @@ local function open_workspace_tree(path)
   -- close a tree that is already visible.
   require("lazy").load { plugins = { "nvim-tree.lua" } }
   require("nvim-tree.api").tree.open { path = path }
+end
+
+local function browse_files(root, prompt_title, results_title)
+  local opts = picker_layout()
+
+  opts.cwd = root
+  opts.path = root
+  opts.cwd_to_path = true
+  opts.files = true
+  opts.add_dirs = true
+  opts.depth = 1
+  opts.grouped = true
+  opts.hidden = false
+  opts.hide_parent_dir = true
+  opts.create_from_prompt = false
+  opts.prompt_title = prompt_title
+  opts.results_title = results_title
+
+  file_browser().file_browser(opts)
 end
 
 local function enable_dashboard_mouse()
@@ -79,6 +114,16 @@ function M.set_workspace(path)
   return true
 end
 
+function M.toggle_tree()
+  local root = current_directory()
+  require("lazy").load { plugins = { "nvim-tree.lua" } }
+  require("nvim-tree.api").tree.toggle {
+    path = root,
+    update_root = true,
+    focus = true,
+  }
+end
+
 function M.choose_workspace()
   local actions = require "telescope.actions"
   local action_state = require "telescope.actions.state"
@@ -117,22 +162,12 @@ end
 
 function M.open_file()
   local root = current_directory()
-  local opts = picker_layout()
+  browse_files(root, "Open One File  •  Enter folders to browse", vim.fn.fnamemodify(root, ":~"))
+end
 
-  opts.cwd = root
-  opts.path = root
-  opts.cwd_to_path = true
-  opts.files = true
-  opts.add_dirs = true
-  opts.depth = 1
-  opts.grouped = true
-  opts.hidden = false
-  opts.hide_parent_dir = true
-  opts.create_from_prompt = false
-  opts.prompt_title = "Open One File  •  Enter folders to browse"
-  opts.results_title = vim.fn.fnamemodify(root, ":~")
-
-  file_browser().file_browser(opts)
+function M.browse_filesystem()
+  local root = filesystem_root(current_directory())
+  browse_files(root, "Browse Filesystem  •  Enter folders to browse", root)
 end
 
 return M

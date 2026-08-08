@@ -362,14 +362,34 @@ func syncLisanNvimAssets(sourceRoot, nvimTarget string) error {
 			return err
 		}
 	}
-	if strings.Contains(string(data), "lisan.header") {
+	updated := string(data)
+	if !strings.Contains(updated, "lisan.header") {
+		updated = strings.Replace(updated, "M.nvdash = {", "M.nvdash = {\n  header = function() return require(\"lisan.header\").lines() end,", 1)
+		if updated == string(data) {
+			return errors.New("Lisan NvChad config has no nvdash block")
+		}
+	}
+	if !strings.Contains(updated, `keys = "fr"`) {
+		updated, _ = insertLineAfterContaining(updated, `keys = "ff"`, `    { txt = "󰉋  Browse Filesystem", keys = "fr", cmd = "lua require('lisan.picker').browse_filesystem()" },`)
+	}
+	if updated == string(data) {
 		return nil
 	}
-	updated := strings.Replace(string(data), "M.nvdash = {", "M.nvdash = {\n  header = function() return require(\"lisan.header\").lines() end,", 1)
-	if updated == string(data) {
-		return errors.New("Lisan NvChad config has no nvdash block")
-	}
 	return safefile.Write(chadrc, []byte(updated), 0o755, 0o644)
+}
+
+func insertLineAfterContaining(value, needle, addition string) (string, bool) {
+	lines := strings.Split(value, "\n")
+	for index, line := range lines {
+		if !strings.Contains(line, needle) {
+			continue
+		}
+		lines = append(lines, "")
+		copy(lines[index+2:], lines[index+1:])
+		lines[index+1] = addition
+		return strings.Join(lines, "\n"), true
+	}
+	return value, false
 }
 
 // SeedUserAssets installs only user assets selected by the active Wormsign

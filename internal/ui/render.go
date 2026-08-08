@@ -18,7 +18,7 @@ import (
 
 func (m *Model) View() tea.View {
 	currentTheme := theme.All[m.themeIndex]
-	if m.width < 16 || m.height < 5 {
+	if m.wrapSafeWidth() < 16 || m.height < 5 {
 		return m.compactView(currentTheme)
 	}
 	bodyHeight := m.mainContentHeight()
@@ -33,7 +33,10 @@ func (m *Model) View() tea.View {
 	parts = append(parts, main)
 	body := lipgloss.JoinHorizontal(lipgloss.Top, parts...)
 	footer := m.renderFooter(currentTheme)
-	content := lipgloss.JoinVertical(lipgloss.Left, top, body, footer)
+	// Do not use JoinVertical here: it pads narrower blocks to the widest row.
+	// The body deliberately leaves the terminal's final column untouched, so
+	// padding it back to the top bar width would reintroduce Windows EOL wrap.
+	content := strings.Join([]string{top, body, footer}, "\n")
 
 	view := tea.NewView(content)
 	view.AltScreen = true
@@ -46,10 +49,11 @@ func (m *Model) View() tea.View {
 }
 
 func (m *Model) compactView(currentTheme theme.Theme) tea.View {
-	content := lipgloss.NewStyle().Width(m.width).Height(m.height).
+	wrapSafeWidth := m.wrapSafeWidth()
+	content := lipgloss.NewStyle().Width(wrapSafeWidth).Height(m.height).
 		Foreground(lipgloss.Color(currentTheme.Primary)).
 		Background(lipgloss.Color(currentTheme.Background)).
-		Render(trimRunes(" Resize terminal", m.width))
+		Render(trimRunes(" Resize terminal", wrapSafeWidth))
 	view := tea.NewView(content)
 	view.AltScreen = true
 	view.WindowTitle = "LisanAlGaib"
@@ -143,7 +147,7 @@ func (m *Model) renderSidebar(t theme.Theme, height int) string {
 		}
 		lines = append(lines, style.Render(trimRunes(label, sidebarWidth-3)))
 	}
-	return lipgloss.NewStyle().Width(sidebarWidth - 1).Height(height).BorderRight(true).BorderForeground(lipgloss.Color(t.Border)).Render(strings.Join(lines, "\n"))
+	return lipgloss.NewStyle().Width(sidebarWidth).Height(height).BorderRight(true).BorderForeground(lipgloss.Color(t.Border)).Render(strings.Join(lines, "\n"))
 }
 
 func (m *Model) renderMain(t theme.Theme, width, height int) string {

@@ -398,8 +398,17 @@ func (m *Model) visibleSession() (*terminalhost.Session, string) {
 	return m.sessions[id], id
 }
 
+// wrapSafeWidth leaves the terminal body's final column untouched. Some host
+// terminals defer wrapping after a write in that column until the next printable
+// cell, which can carry a pane's background into column zero of the following
+// row. This must be host-agnostic: a Linux process inside Docker may still be
+// drawn by Windows Terminal. The View background paints the reserved cell.
+func (m *Model) wrapSafeWidth() int {
+	return max(m.width-1, 1)
+}
+
 func (m *Model) mainPaneWidth() int {
-	width := m.width
+	width := m.wrapSafeWidth()
 	if m.sidebarDrawn() {
 		width -= sidebarWidth
 	}
@@ -407,7 +416,7 @@ func (m *Model) mainPaneWidth() int {
 }
 
 func (m *Model) sidebarDrawn() bool {
-	return m.sidebar && m.width >= sidebarWidth+8
+	return m.sidebar && m.wrapSafeWidth() >= sidebarWidth+8
 }
 
 func (m *Model) embeddedDimensions() (int, int) {

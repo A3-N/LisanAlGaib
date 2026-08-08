@@ -68,6 +68,10 @@ if command -v nvim >/dev/null 2>&1 && [ -f "$lisan_chadrc" ] && grep -Eq 'keys =
     -e "/keys = \"ff\"/c\\    { txt = \"󰱼  Open File\", keys = \"ff\", cmd = \"lua require('lisan.picker').open_file()\" }," \
     "$lisan_chadrc"
 
+  if ! grep -q 'keys = "fr"' "$lisan_chadrc"; then
+    sed -i "/keys = \"ff\"/a\\    { txt = \"󰉋  Browse Filesystem\", keys = \"fr\", cmd = \"lua require('lisan.picker').browse_filesystem()\" }," "$lisan_chadrc"
+  fi
+
   if [ ! -d /home/fremen/.local/share/nvim/lazy/telescope-file-browser.nvim ] || \
     [ ! -d /home/fremen/.local/share/nvim/lazy/SmoothCursor.nvim ] || \
     [ ! -d /home/fremen/.local/share/nvim/lazy/smear-cursor.nvim ]; then

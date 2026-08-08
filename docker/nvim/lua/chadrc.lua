@@ -10,6 +10,7 @@ M.nvdash = {
   header = function() return require("lisan.header").lines() end,
   buttons = {
     { txt = "󰱼  Open File", keys = "ff", cmd = "lua require('lisan.picker').open_file()" },
+    { txt = "󰉋  Browse Filesystem", keys = "fr", cmd = "lua require('lisan.picker').browse_filesystem()" },
     { txt = function() return require("lisan.picker").workspace_label() end, keys = "fb", cmd = "lua require('lisan.picker').choose_workspace()" },
     { txt = "  Recent Files", keys = "fo", cmd = "Telescope oldfiles" },
     { txt = "󰈭  Find Word", keys = "fw", cmd = "Telescope live_grep" },

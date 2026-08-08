@@ -16,7 +16,7 @@ func TestSyncLisanNvimAssetsRefreshesManagedModules(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(chadrc), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(chadrc, []byte("local M = {}\nM.nvdash = {\n  buttons = { require('lisan.picker') },\n}\nreturn M\n"), 0o644); err != nil {
+	if err := os.WriteFile(chadrc, []byte("local M = {}\nM.nvdash = {\n  buttons = {\n    { txt = \"Open File\", keys = \"ff\", cmd = \"lua require('lisan.picker').open_file()\" },\n  },\n}\nreturn M\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := syncLisanNvimAssets(filepath.Join("..", ".."), target); err != nil {
@@ -28,6 +28,19 @@ func TestSyncLisanNvimAssetsRefreshesManagedModules(t *testing.T) {
 	}
 	if !strings.Contains(string(updated), "lisan.header") {
 		t.Fatalf("NvChad config did not receive the shared header: %s", updated)
+	}
+	if !strings.Contains(string(updated), `keys = "fr"`) || !strings.Contains(string(updated), "browse_filesystem") {
+		t.Fatalf("NvChad dashboard did not receive the filesystem-root browser: %s", updated)
+	}
+	if err := syncLisanNvimAssets(filepath.Join("..", ".."), target); err != nil {
+		t.Fatal(err)
+	}
+	idempotent, err := os.ReadFile(chadrc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(idempotent), `keys = "fr"`) != 1 {
+		t.Fatalf("NvChad dashboard migration duplicated its filesystem-root action: %s", idempotent)
 	}
 	headerPath := filepath.Join(target, "lua", "lisan", "header.lua")
 	header, err := os.ReadFile(headerPath)
@@ -44,8 +57,15 @@ func TestSyncLisanNvimAssetsRefreshesManagedModules(t *testing.T) {
 	if strings.Contains(string(picker), `vim.cmd "enew"`) || !strings.Contains(string(picker), `tree.open { path = path }`) {
 		t.Fatal("NvChad picker does not open NvimTree as the selected workspace view")
 	}
-	if _, err := os.Stat(filepath.Join(target, "lua", "plugins", "lisan-file-browser.lua")); err != nil {
+	if !strings.Contains(string(picker), "browse_filesystem") || !strings.Contains(string(picker), "update_root = true") {
+		t.Fatal("NvChad picker does not browse the filesystem root or track Neovim's current directory")
+	}
+	fileBrowser, err := os.ReadFile(filepath.Join(target, "lua", "plugins", "lisan-file-browser.lua"))
+	if err != nil {
 		t.Fatalf("NvChad file-browser plugin declaration was not refreshed: %v", err)
+	}
+	if !strings.Contains(string(fileBrowser), `"<C-n>"`) || !strings.Contains(string(fileBrowser), "toggle_tree") || !strings.Contains(string(fileBrowser), `"VimEnter"`) {
+		t.Fatal("NvChad Ctrl-N does not use Lisan's current-directory tree toggle")
 	}
 	if cursor, err := os.ReadFile(filepath.Join(target, "lua", "plugins", "lisan-cursor.lua")); err != nil {
 		t.Fatalf("NvChad cursor plugin declaration was not refreshed: %v", err)

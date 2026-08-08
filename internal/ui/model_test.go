@@ -29,8 +29,8 @@ func TestMouseTopBarAndTheme(t *testing.T) {
 	model.height = 30
 
 	toolX := 0
-	for _, span := range navigationSpans(model.width) {
-		if navigation[span.Index].Section == sectionTools {
+	for _, span := range navigationSpansFor(model.navigation, model.width) {
+		if model.navigation[span.Index].Section == sectionTools {
 			toolX = span.Start
 		}
 	}
@@ -144,6 +144,16 @@ func TestOverviewUsesSharedASCIIArtwork(t *testing.T) {
 	}
 	if content := model.View().Content; !strings.Contains(content, art[0]) {
 		t.Fatal("Overview does not render the shared ascii.txt artwork")
+	}
+	viewLines := strings.Split(model.View().Content, "\n")
+	sidebar := model.renderSidebar(theme.All[model.themeIndex], model.mainContentHeight())
+	if width := lipgloss.Width(sidebar); width != sidebarWidth {
+		t.Fatalf("Overview sidebar has width %d, want configured width %d", width, sidebarWidth)
+	}
+	for index, line := range viewLines[model.topHeight() : len(viewLines)-footerHeight] {
+		if width := lipgloss.Width(line); width != model.wrapSafeWidth() {
+			t.Fatalf("Overview body row %d has width %d, want wrap-safe width %d", index, width, model.wrapSafeWidth())
+		}
 	}
 	main := strings.Join(model.overviewLines(theme.All[model.themeIndex], model.mainPaneWidth(), model.mainContentHeight()), "\n")
 	for _, redundant := range []string{"Workspace", "Config profile", "Process user", "APT manual"} {
@@ -528,8 +538,8 @@ func TestSmallTerminalUsesItsActualDimensions(t *testing.T) {
 		t.Fatalf("compact view has %d lines, want 3", len(lines))
 	}
 	for index, line := range lines {
-		if width := lipgloss.Width(line); width != 12 {
-			t.Fatalf("compact row %d has width %d, want 12", index, width)
+		if width := lipgloss.Width(line); width != model.wrapSafeWidth() {
+			t.Fatalf("compact row %d has width %d, want wrap-safe width %d", index, width, model.wrapSafeWidth())
 		}
 	}
 }
@@ -538,10 +548,14 @@ func TestNarrowTerminalHidesSidebarWithoutShrinkingMainPastViewport(t *testing.T
 	model := NewModel(t.TempDir())
 	model.sidebar = true
 	model.width = sidebarWidth + 7
-	if model.sidebarDrawn() || model.mainPaneWidth() != model.width {
+	if model.sidebarDrawn() || model.mainPaneWidth() != model.wrapSafeWidth() {
 		t.Fatalf("narrow layout still drew sidebar: drawn=%v main=%d width=%d", model.sidebarDrawn(), model.mainPaneWidth(), model.width)
 	}
 	model.width = sidebarWidth + 8
+	if model.sidebarDrawn() || model.mainPaneWidth() != model.wrapSafeWidth() {
+		t.Fatalf("reserved final column was counted as sidebar space: drawn=%v main=%d", model.sidebarDrawn(), model.mainPaneWidth())
+	}
+	model.width = sidebarWidth + 9
 	if !model.sidebarDrawn() || model.mainPaneWidth() != 8 {
 		t.Fatalf("wide-enough layout did not restore sidebar: drawn=%v main=%d", model.sidebarDrawn(), model.mainPaneWidth())
 	}

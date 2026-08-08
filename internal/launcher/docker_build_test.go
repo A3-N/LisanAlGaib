@@ -94,6 +94,38 @@ func TestDockerNvChadSelectionSurvivesAnExistingHomeVolume(t *testing.T) {
 	if !strings.Contains(string(entrypoint), guard) || !strings.Contains(string(entrypoint), `cp -a "$nvim_template/." /home/fremen/.config/nvim/`) {
 		t.Fatal("entrypoint does not safely seed NvChad into an existing home volume")
 	}
+	for _, expected := range []string{`keys = "fr"`, "browse_filesystem", "lisan-file-browser.lua"} {
+		if !strings.Contains(string(entrypoint), expected) {
+			t.Fatalf("persistent NvChad migration omits %q", expected)
+		}
+	}
+}
+
+func TestNvChadTreeTracksLaunchDirectoryAndOffersRootBrowser(t *testing.T) {
+	root := filepath.Join("..", "..")
+	picker, err := os.ReadFile(filepath.Join(root, "docker", "nvim", "lua", "lisan", "picker.lua"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"function M.toggle_tree()", "path = root", "update_root = true", "function M.browse_filesystem()", `return "/"`} {
+		if !strings.Contains(string(picker), expected) {
+			t.Fatalf("NvChad picker omits %q", expected)
+		}
+	}
+	plugin, err := os.ReadFile(filepath.Join(root, "docker", "nvim", "lua", "plugins", "lisan-file-browser.lua"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(plugin), `"<C-n>"`) || !strings.Contains(string(plugin), "toggle_tree") || !strings.Contains(string(plugin), `"VimEnter"`) {
+		t.Fatal("Ctrl-N is not bound to the current-directory-aware NvimTree toggle")
+	}
+	chadrc, err := os.ReadFile(filepath.Join(root, "docker", "nvim", "lua", "chadrc.lua"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(chadrc), `keys = "fr"`) || !strings.Contains(string(chadrc), "browse_filesystem") {
+		t.Fatal("NvChad dashboard does not offer the filesystem-root browser")
+	}
 }
 
 func TestNvChadCursorAnimationsArePinnedAndSynced(t *testing.T) {
