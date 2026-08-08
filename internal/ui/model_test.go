@@ -174,6 +174,39 @@ func TestOverviewUsesSharedASCIIArtwork(t *testing.T) {
 	}
 }
 
+func TestOverviewArtworkUsesOneCanvasAtEveryWidth(t *testing.T) {
+	for _, width := range []int{72, 240} {
+		art := fitASCII(overviewASCII, width, 100)
+		if len(art) == 0 {
+			t.Fatalf("artwork was empty at width %d", width)
+		}
+		expectedWidth := lipgloss.Width(art[0])
+		if expectedWidth != min(width, 118) {
+			t.Fatalf("artwork width is %d at limit %d, want %d", expectedWidth, width, min(width, 118))
+		}
+		for index, line := range art {
+			if lineWidth := lipgloss.Width(line); lineWidth != expectedWidth {
+				t.Fatalf("artwork row %d has width %d at limit %d, want shared canvas width %d", index, lineWidth, width, expectedWidth)
+			}
+		}
+	}
+
+	const (
+		viewportWidth  = 240
+		viewportHeight = 60
+	)
+	art := fitASCII(overviewASCII, viewportWidth-4, viewportHeight-2)
+	lines := (&Model{}).overviewLines(theme.All[0], viewportWidth, viewportHeight)
+	top := (viewportHeight - len(art)) / 2
+	left := (viewportWidth - lipgloss.Width(art[0])) / 2
+	for index, artLine := range art {
+		expected := strings.Repeat(" ", left) + artLine
+		if lines[top+index] != expected {
+			t.Fatalf("large Overview row %d was not positioned as one canvas", index)
+		}
+	}
+}
+
 func TestExtensionsUseOneStickyMenuAndManifestDrivenPanels(t *testing.T) {
 	profile := appconfig.ProfileFromPreset(appconfig.Presets[0], time.Now())
 	custom := appconfig.ConnectorConfig{

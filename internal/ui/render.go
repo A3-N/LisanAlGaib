@@ -198,8 +198,12 @@ func (m *Model) overviewLines(_ theme.Theme, width, height int) []string {
 	for index := 0; index < max((height-len(art))/2, 0); index++ {
 		lines = append(lines, "")
 	}
+	artWidth := 0
+	if len(art) > 0 {
+		artWidth = visibleWidth(art[0])
+	}
+	left := max((width-artWidth)/2, 0)
 	for _, line := range art {
-		left := max((width-visibleWidth(line))/2, 0)
 		lines = append(lines, strings.Repeat(" ", left)+line)
 	}
 	return lines
@@ -210,6 +214,21 @@ func fitASCII(value string, width, height int) []string {
 	if len(source) == 0 || width <= 0 || height <= 0 {
 		return nil
 	}
+	sourceWidth := 0
+	canvas := make([][]rune, len(source))
+	for index, sourceLine := range source {
+		canvas[index] = []rune(sourceLine)
+		sourceWidth = max(sourceWidth, len(canvas[index]))
+	}
+	if sourceWidth == 0 {
+		return nil
+	}
+	for index, sourceLine := range canvas {
+		if padding := sourceWidth - len(sourceLine); padding > 0 {
+			canvas[index] = append(sourceLine, []rune(strings.Repeat(" ", padding))...)
+		}
+	}
+	targetWidth := min(sourceWidth, width)
 	targetHeight := min(len(source), height)
 	result := make([]string, 0, targetHeight)
 	for targetY := 0; targetY < targetHeight; targetY++ {
@@ -217,11 +236,11 @@ func fitASCII(value string, width, height int) []string {
 		if targetHeight < len(source) && targetHeight > 1 {
 			sourceY = targetY * (len(source) - 1) / (targetHeight - 1)
 		}
-		line := []rune(source[sourceY])
-		if len(line) > width {
-			resized := make([]rune, width)
+		line := canvas[sourceY]
+		if sourceWidth > targetWidth {
+			resized := make([]rune, targetWidth)
 			for targetX := range resized {
-				resized[targetX] = line[targetX*len(line)/width]
+				resized[targetX] = line[targetX*sourceWidth/targetWidth]
 			}
 			line = resized
 		}
