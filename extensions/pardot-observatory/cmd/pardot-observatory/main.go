@@ -19,6 +19,14 @@ import (
 
 	"lisanalgaib/internal/connectors"
 	"lisanalgaib/internal/extensionhost"
+	"lisanalgaib/internal/safefile"
+)
+
+const (
+	maxRememberedJobs = 128
+	maxNotes          = 256
+	maxOpenSessions   = 16
+	maxNotesFileBytes = 128 << 10
 )
 
 func main() {
@@ -137,11 +145,22 @@ func (o *observatory) StartJob(_ context.Context, request connectors.StartJobReq
 		if note == "" || len([]rune(note)) > 200 {
 			return connectors.Job{}, errors.New("note must contain 1-200 characters")
 		}
-		o.mu.Lock()
-		o.notes = append(o.notes, note)
-		o.saveNotesLocked()
 		job := connectors.Job{ID: jobID, ActionID: request.ActionID, Status: connectors.JobSucceeded, Progress: 100, StatusText: "recorded", Result: "Observation recorded"}
-		o.jobs[jobID] = &surveyJob{job: job}
+		o.mu.Lock()
+		if err := o.reserveJobLocked(jobID, &surveyJob{job: job}); err != nil {
+			o.mu.Unlock()
+			return connectors.Job{}, err
+		}
+		notes := append(append([]string(nil), o.notes...), note)
+		if len(notes) > maxNotes {
+			notes = notes[len(notes)-maxNotes:]
+		}
+		if err := o.saveNotes(notes); err != nil {
+			delete(o.jobs, jobID)
+			o.mu.Unlock()
+			return connectors.Job{}, fmt.Errorf("save observation: %w", err)
+		}
+		o.notes = notes
 		o.mu.Unlock()
 		return job, nil
 	case "survey":
@@ -160,13 +179,43 @@ func (o *observatory) StartJob(_ context.Context, request connectors.StartJobReq
 		jobContext, cancel := context.WithCancel(context.Background())
 		job := connectors.Job{ID: jobID, ActionID: request.ActionID, Status: connectors.JobQueued, Progress: 0, StatusText: "survey queued"}
 		o.mu.Lock()
-		o.jobs[jobID] = &surveyJob{job: job, cancel: cancel}
+		if err := o.reserveJobLocked(jobID, &surveyJob{job: job, cancel: cancel}); err != nil {
+			o.mu.Unlock()
+			cancel()
+			return connectors.Job{}, err
+		}
 		o.mu.Unlock()
 		go o.runSurvey(jobContext, jobID, subject, samples, detail, request.Inputs["environment"] == "true")
 		return job, nil
 	default:
 		return connectors.Job{}, extensionhost.ErrNotFound
 	}
+}
+
+// reserveJobLocked bounds memory even when a compromised workspace floods the
+// example extension's API. Old terminal jobs are discarded first; active work
+// is never silently cancelled to make room.
+func (o *observatory) reserveJobLocked(id string, entry *surveyJob) error {
+	if len(o.jobs) >= maxRememberedJobs {
+		var terminal []string
+		for jobID, candidate := range o.jobs {
+			if candidate.job.Terminal() {
+				terminal = append(terminal, jobID)
+			}
+		}
+		sort.Strings(terminal)
+		for _, jobID := range terminal {
+			delete(o.jobs, jobID)
+			if len(o.jobs) < maxRememberedJobs {
+				break
+			}
+		}
+	}
+	if len(o.jobs) >= maxRememberedJobs {
+		return errors.New("too many active observatory jobs")
+	}
+	o.jobs[id] = entry
+	return nil
 }
 
 func (o *observatory) runSurvey(ctx context.Context, jobID, subject string, samples int, detail string, includeEnvironment bool) {
@@ -194,6 +243,7 @@ func (o *observatory) runSurvey(ctx context.Context, jobID, subject string, samp
 	o.mu.Lock()
 	entry := o.jobs[jobID]
 	entry.artifact = report
+	entry.cancel = nil
 	entry.job.Status, entry.job.Progress, entry.job.StatusText = connectors.JobSucceeded, 100, "survey complete"
 	entry.job.Result = fmt.Sprintf("Collected %d samples for %s", samples, subject)
 	entry.job.Artifacts = []connectors.Artifact{artifact}
@@ -228,6 +278,7 @@ func (o *observatory) CancelJob(_ context.Context, id string) (connectors.Job, e
 	}
 	if entry.cancel != nil && !entry.job.Terminal() {
 		entry.cancel()
+		entry.cancel = nil
 		entry.job.Status, entry.job.StatusText = connectors.JobCancelled, "cancellation requested"
 	}
 	return cloneJob(entry.job), nil
@@ -250,6 +301,10 @@ func (o *observatory) OpenSession(_ context.Context, request connectors.OpenSess
 	id := fmt.Sprintf("session-%06d", o.sequence.Add(1))
 	session := connectors.Session{ID: id, SessionID: request.SessionID, Status: "open", Output: "PARDOT FIELD CONSOLE\nType help for permitted commands.\n", Prompt: "pardot> "}
 	o.mu.Lock()
+	if len(o.sessions) >= maxOpenSessions {
+		o.mu.Unlock()
+		return connectors.Session{}, errors.New("too many open observatory sessions")
+	}
 	o.sessions[id] = &fieldSession{session: session}
 	o.mu.Unlock()
 	return session, nil
@@ -321,23 +376,29 @@ func (o *observatory) notesPath() string {
 }
 
 func (o *observatory) loadNotes() {
-	data, err := os.ReadFile(o.notesPath())
+	path := o.notesPath()
+	if path == "" {
+		return
+	}
+	data, err := safefile.Read(path, maxNotesFileBytes)
 	if err == nil {
 		for _, line := range strings.Split(string(data), "\n") {
 			if line = strings.TrimSpace(line); line != "" {
 				o.notes = append(o.notes, line)
 			}
 		}
+		if len(o.notes) > maxNotes {
+			o.notes = o.notes[len(o.notes)-maxNotes:]
+		}
 	}
 }
 
-func (o *observatory) saveNotesLocked() {
+func (o *observatory) saveNotes(notes []string) error {
 	path := o.notesPath()
 	if path == "" {
-		return
+		return nil
 	}
-	_ = os.MkdirAll(filepath.Dir(path), 0o700)
-	_ = os.WriteFile(path, []byte(strings.Join(o.notes, "\n")+"\n"), 0o600)
+	return safefile.Write(path, []byte(strings.Join(notes, "\n")+"\n"), 0o700, 0o600)
 }
 
 func cloneJob(job connectors.Job) connectors.Job {

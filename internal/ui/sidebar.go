@@ -15,6 +15,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	connectorapi "lisanalgaib/internal/connectors"
+	"lisanalgaib/internal/files"
 	"lisanalgaib/internal/inventory"
 	"lisanalgaib/internal/safefile"
 )
@@ -481,14 +482,25 @@ func (m *Model) cancelConnectorJob() tea.Cmd {
 
 func (m *Model) openOrCaptureConnectorSession() tea.Cmd {
 	connectorID := m.selectedConnector
-	if current, ok := m.connectorSessions[connectorID]; ok && current.SessionID == m.selectedSession && current.Status == "open" {
+	if m.connectorSessionPending[connectorID] {
+		m.status = "Extension session is already opening…"
+		return nil
+	}
+	current, hasCurrent := m.connectorSessions[connectorID]
+	if hasCurrent && current.SessionID == m.selectedSession && current.Status == "open" {
 		m.extensionSessionCapture = true
 		m.status = "Extension session input active · Ctrl-G returns to wrapper"
 		return nil
 	}
 	endpoint := m.connectorEndpoint(connectorID)
 	request := connectorapi.OpenSessionRequest{SessionID: m.selectedSession, Rows: max(m.mainContentHeight()-4, 1), Columns: max(m.mainPaneWidth()-4, 1)}
+	m.connectorSessionPending[connectorID] = true
 	return func() tea.Msg {
+		if hasCurrent && current.Status == "open" {
+			if _, err := connectorapi.CloseSession(m.ctx, endpoint, current.ID); err != nil {
+				return connectorSessionMsg{ConnectorID: connectorID, Err: fmt.Errorf("close previous session: %w", err)}
+			}
+		}
 		session, err := connectorapi.OpenSession(m.ctx, endpoint, request)
 		return connectorSessionMsg{ConnectorID: connectorID, Session: session, ClearInput: true, Capture: true, Err: err}
 	}
@@ -560,10 +572,7 @@ func (m *Model) exportConnectorArtifact(artifactID string) tea.Cmd {
 		if directory == "" {
 			directory = filepath.Join(m.root, "shared")
 		}
-		name := filepath.Base(metadata.Name)
-		if name == "." || name == string(filepath.Separator) || name == "" {
-			name = metadata.ID + ".bin"
-		}
+		name := files.SafeName(metadata.Name, metadata.ID+".bin")
 		path := filepath.Join(directory, name)
 		if err := safefile.Write(path, data, 0o755, 0o644); err != nil {
 			return connectorArtifactMsg{ConnectorID: connectorID, Err: err}

@@ -27,6 +27,14 @@ func TestCleanTitleRemovesTerminalControls(t *testing.T) {
 	}
 }
 
+func TestTerminalDimensionIsBounded(t *testing.T) {
+	for input, want := range map[int]uint16{-1: 2, 2: 2, 80: 80, maxTerminalDimension + 1: maxTerminalDimension} {
+		if got := terminalDimension(input); got != want {
+			t.Fatalf("terminalDimension(%d) = %d, want %d", input, got, want)
+		}
+	}
+}
+
 func TestSessionRendersAndAcceptsInput(t *testing.T) {
 	session, err := Start(Spec{
 		ID:   "test",

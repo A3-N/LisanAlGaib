@@ -127,12 +127,9 @@ func run(arguments []string) (resultErr error) {
 				return fmt.Errorf("locate source runtime: %w", err)
 			}
 		}
-		sharedRoot := filepath.Join(runtimeRoot, "shared")
-		if document.RuntimeRoot != "" {
-			sharedRoot = filepath.Join(filepath.Dir(runtimeRoot), "shared")
-		}
-		if err := os.MkdirAll(sharedRoot, 0o755); err != nil {
-			return fmt.Errorf("prepare shared directory: %w", err)
+		sharedRoot, err := launcher.PrepareSharedDirectory(runtimeRoot, document.RuntimeRoot != "")
+		if err != nil {
+			return err
 		}
 		if err := os.Setenv("LISAN_SHARED_DIR", sharedRoot); err != nil {
 			return err

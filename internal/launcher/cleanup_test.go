@@ -66,3 +66,17 @@ func TestCleanupRejectsMalformedDockerImageIDs(t *testing.T) {
 		t.Fatalf("malformed image IDs became cleanup targets: %#v", images)
 	}
 }
+
+func TestParseDockerActiveExecCount(t *testing.T) {
+	for input, want := range map[string]int{"0": 0, " 2\n": 2} {
+		got, err := parseDockerActiveExecCount(input)
+		if err != nil || got != want {
+			t.Fatalf("parseDockerActiveExecCount(%q) = %d, %v; want %d", input, got, err, want)
+		}
+	}
+	for _, input := range []string{"", "-1", "many"} {
+		if _, err := parseDockerActiveExecCount(input); err == nil {
+			t.Fatalf("parseDockerActiveExecCount(%q) accepted invalid output", input)
+		}
+	}
+}

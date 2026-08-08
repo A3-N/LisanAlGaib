@@ -7,6 +7,7 @@ import (
 	"io"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"lisanalgaib/internal/appconfig"
@@ -20,20 +21,59 @@ type CleanupOptions struct {
 
 var dockerImageID = regexp.MustCompile(`^[a-f0-9]{12,64}$`)
 
-func cleanupStartedDocker(ctx context.Context, workspaceStarted bool, connectors []appconfig.ConnectorConfig, stdout, stderr io.Writer) error {
-	var result error
-	for index := len(connectors) - 1; index >= 0; index-- {
-		connector := connectors[index]
-		if err := stopManagedConnector(ctx, connector, stdout, stderr); err != nil {
-			result = errors.Join(result, err)
+// cleanupDockerSession stops runtime processes after the interactive exec has
+// ended, while retaining named volumes and container metadata for a fast next
+// launch. Active Docker execs are daemon-owned leases, so a second cockpit is
+// never inferred from process names that untrusted workspace code can spoof.
+func cleanupDockerSession(ctx context.Context, stdout, stderr io.Writer) error {
+	if containerRunning(ctx, workspaceContainer) && dockerWorkspaceOwned(ctx, workspaceContainer) {
+		active, err := dockerActiveExecCount(ctx, workspaceContainer)
+		if err != nil {
+			return fmt.Errorf("inspect active Docker sessions: %w", err)
+		}
+		if active > 0 {
+			return nil
 		}
 	}
-	if workspaceStarted && containerRunning(ctx, workspaceContainer) && dockerWorkspaceOwned(ctx, workspaceContainer) {
+
+	var result error
+	output, err := dockerOutput(ctx, "ps", "--filter", "label=io.lisanalgaib.connector", "--format", `{{.Names}}|{{.Label "io.lisanalgaib.connector"}}`)
+	if err != nil {
+		result = errors.Join(result, fmt.Errorf("list running managed extensions: %w", err))
+	} else {
+		for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+			name, id, ok := strings.Cut(line, "|")
+			name, id = strings.TrimSpace(name), strings.TrimSpace(id)
+			if !ok || !dockerName.MatchString(name) || !dockerName.MatchString(id) {
+				continue
+			}
+			if err := runDocker(ctx, stdout, stderr, "stop", name); err != nil {
+				result = errors.Join(result, fmt.Errorf("stop managed extension %s: %w", name, err))
+			}
+		}
+	}
+	if containerRunning(ctx, workspaceContainer) && dockerWorkspaceOwned(ctx, workspaceContainer) {
 		if err := runDocker(ctx, stdout, stderr, "stop", workspaceContainer); err != nil {
 			result = errors.Join(result, fmt.Errorf("stop Docker workspace: %w", err))
 		}
 	}
 	return result
+}
+
+func dockerActiveExecCount(ctx context.Context, container string) (int, error) {
+	value, err := dockerOutput(ctx, "inspect", "--format", `{{len .ExecIDs}}`, container)
+	if err != nil {
+		return 0, err
+	}
+	return parseDockerActiveExecCount(value)
+}
+
+func parseDockerActiveExecCount(value string) (int, error) {
+	count, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || count < 0 {
+		return 0, fmt.Errorf("invalid active exec count %q", strings.TrimSpace(value))
+	}
+	return count, nil
 }
 
 // Cleanup is an idempotent full reset of Lisan-owned Docker state. The dedicated
@@ -136,23 +176,44 @@ func Cleanup(ctx context.Context, options CleanupOptions) error {
 			cliout.Detail(stdout, "removed", "Docker network "+workspaceNetwork)
 		}
 	}
-	if dockerObjectExists(ctx, "network", extensionControlNetwork) && dockerNetworkOwned(ctx, extensionControlNetwork) {
-		attached, attachedErr := dockerOutput(ctx, "network", "inspect", "--format", `{{range .Containers}}{{.Name}} {{end}}`, extensionControlNetwork)
+	if dockerObjectExists(ctx, "network", legacyExtensionControlNetwork) && dockerNetworkOwned(ctx, legacyExtensionControlNetwork) {
+		attached, attachedErr := dockerOutput(ctx, "network", "inspect", "--format", `{{range .Containers}}{{.Name}} {{end}}`, legacyExtensionControlNetwork)
 		if attachedErr != nil {
 			result = errors.Join(result, fmt.Errorf("list extension control network attachments: %w", attachedErr))
 		} else {
 			for _, name := range strings.Fields(attached) {
 				if dockerName.MatchString(name) {
-					if err := runDocker(ctx, stdout, stderr, "network", "disconnect", "--force", extensionControlNetwork, name); err != nil {
+					if err := runDocker(ctx, stdout, stderr, "network", "disconnect", "--force", legacyExtensionControlNetwork, name); err != nil {
 						result = errors.Join(result, fmt.Errorf("disconnect %s from extension control network: %w", name, err))
 					}
 				}
 			}
 		}
-		if err := runDocker(ctx, stdout, stderr, "network", "rm", extensionControlNetwork); err != nil {
+		if err := runDocker(ctx, stdout, stderr, "network", "rm", legacyExtensionControlNetwork); err != nil {
 			result = errors.Join(result, fmt.Errorf("remove extension control network: %w", err))
 		} else {
-			cliout.Detail(stdout, "removed", "extension control network "+extensionControlNetwork)
+			cliout.Detail(stdout, "removed", "legacy extension control network "+legacyExtensionControlNetwork)
+		}
+	}
+	controlNetworks, controlErr := dockerOutput(ctx, "network", "ls", "--filter", "label=io.lisanalgaib.extension-control", "--format", `{{.Name}}`)
+	if controlErr != nil {
+		result = errors.Join(result, fmt.Errorf("list extension control networks: %w", controlErr))
+	} else {
+		for _, name := range strings.Fields(controlNetworks) {
+			if !dockerName.MatchString(name) || !dockerExtensionControlOwned(ctx, name) {
+				continue
+			}
+			attached, _ := dockerOutput(ctx, "network", "inspect", "--format", `{{range .Containers}}{{.Name}} {{end}}`, name)
+			for _, container := range strings.Fields(attached) {
+				if dockerName.MatchString(container) {
+					_ = runDocker(ctx, stdout, stderr, "network", "disconnect", "--force", name, container)
+				}
+			}
+			if err := runDocker(ctx, stdout, stderr, "network", "rm", name); err != nil {
+				result = errors.Join(result, fmt.Errorf("remove extension control network %s: %w", name, err))
+			} else {
+				cliout.Detail(stdout, "removed", "extension control network "+name)
+			}
 		}
 	}
 	egressNetworks, egressErr := dockerOutput(ctx, "network", "ls", "--filter", "label=io.lisanalgaib.extension-egress", "--format", `{{.Name}}`)
@@ -261,6 +322,12 @@ func dockerExtensionEgressOwned(ctx context.Context, name string) bool {
 	label, err := dockerOutput(ctx, "network", "inspect", "--format", `{{index .Labels "io.lisanalgaib.extension-egress"}}`, name)
 	id := strings.TrimSpace(label)
 	return err == nil && dockerName.MatchString(id) && name == extensionEgressNetwork(id)
+}
+
+func dockerExtensionControlOwned(ctx context.Context, name string) bool {
+	label, err := dockerOutput(ctx, "network", "inspect", "--format", `{{index .Labels "io.lisanalgaib.extension-control"}}`, name)
+	id := strings.TrimSpace(label)
+	return err == nil && dockerName.MatchString(id) && name == appconfig.ExtensionControlNetworkName(id)
 }
 
 func composeResourceOwned(labels, composeResource string) bool {

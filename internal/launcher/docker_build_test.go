@@ -260,6 +260,28 @@ func TestDockerfilePinsEveryAgentPayloadWithoutManifestTooling(t *testing.T) {
 	}
 }
 
+func TestDockerfilesPinPatchedMultiArchitectureBaseImages(t *testing.T) {
+	const goBuilder = "FROM golang:1.26.5-bookworm@sha256:6c5605ab3a9a9fb3c4eafe5b3d63cdbf3881caf113262b67862547b54a9db599"
+	const workspace = "FROM ubuntu:26.04@sha256:678c6550cc43645e08669028bc177f50be4e7c5b8cca677067b1914d4afc7a03"
+	for _, test := range []struct {
+		path     string
+		required []string
+	}{
+		{filepath.Join("..", "..", "Dockerfile"), []string{goBuilder, workspace}},
+		{filepath.Join("..", "..", "extensions", "pardot-observatory", "Dockerfile"), []string{goBuilder, "FROM scratch"}},
+	} {
+		data, err := os.ReadFile(test.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, required := range test.required {
+			if !strings.Contains(string(data), required) {
+				t.Fatalf("%s does not pin %q", test.path, required)
+			}
+		}
+	}
+}
+
 func TestConnectorDockerfileCopiesOnlyItsDependencyPackages(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "extensions", "pardot-observatory", "Dockerfile"))
 	if err != nil {

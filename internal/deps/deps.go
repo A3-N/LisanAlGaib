@@ -66,12 +66,6 @@ func required(profile appconfig.Profile) []requirement {
 				add(id, id)
 			}
 		}
-		if profile.Agent("codex") || profile.Agent("opencode") {
-			add("npm", "npm")
-		}
-		if runtime.GOOS != "windows" && (profile.Agent("claude") || profile.Agent("kimi")) {
-			add("curl", "curl")
-		}
 	}
 	result := make([]requirement, 0, len(byCommand))
 	for _, requirement := range byCommand {
@@ -210,7 +204,8 @@ func ensure(ctx context.Context, requirements []requirement, output io.Writer) e
 	if len(missingRequirements) == 0 {
 		return nil
 	}
-	plan, err := installPlan(runtime.GOOS, missingRequirements)
+	installRequirements := withInstallerPrerequisites(runtime.GOOS, missingRequirements, exec.LookPath)
+	plan, err := installPlan(runtime.GOOS, installRequirements)
 	if err != nil {
 		return err
 	}
@@ -241,6 +236,37 @@ func ensure(ctx context.Context, requirements []requirement, output io.Writer) e
 	}
 	cliout.Success(output, "Installing dependencies")
 	return nil
+}
+
+// withInstallerPrerequisites adds npm/curl only when an agent is actually
+// missing and its installer command is unavailable. An already-installed
+// native agent therefore never pulls an unused package manager onto the host.
+func withInstallerPrerequisites(goos string, missing []requirement, lookPath func(string) (string, error)) []requirement {
+	result := append([]requirement(nil), missing...)
+	seen := map[string]bool{}
+	for _, item := range result {
+		seen[item.ID] = true
+	}
+	needsNPM, needsCurl := false, false
+	for _, item := range missing {
+		needsNPM = needsNPM || item.ID == "codex" || item.ID == "opencode"
+		needsCurl = needsCurl || (goos != "windows" && (item.ID == "claude" || item.ID == "kimi"))
+	}
+	for _, prerequisite := range []struct {
+		needed  bool
+		id      string
+		command string
+	}{{needsNPM, "npm", "npm"}, {needsCurl, "curl", "curl"}} {
+		if !prerequisite.needed || seen[prerequisite.id] {
+			continue
+		}
+		if _, err := lookPath(prerequisite.command); err == nil {
+			continue
+		}
+		result = append(result, requirement{ID: prerequisite.id, Command: prerequisite.command})
+		seen[prerequisite.id] = true
+	}
+	return result
 }
 
 func packageNames(goos, id string) []string {

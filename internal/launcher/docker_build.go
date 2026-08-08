@@ -138,16 +138,31 @@ func dockerBuildSignature(runtimeRoot string, plan dockerBuildPlan) (string, err
 	hash := sha256.New()
 	fmt.Fprintf(hash, "%#v\n", plan)
 	paths := []string{".dockerignore", "Dockerfile", "go.mod", "go.sum", "cmd", "internal", "docker/lisan-entrypoint", "docker/nvim", "docker/home"}
+	if err := writeRuntimeFingerprint(hash, runtimeRoot, paths); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
+}
+
+// writeRuntimeFingerprint hashes a deterministic, runtime-relative view of
+// build inputs. It is shared by the workspace and extension cache keys so the
+// two image paths cannot drift into subtly different file handling.
+func writeRuntimeFingerprint(output io.Writer, runtimeRoot string, paths []string) error {
 	var files []string
+	seen := map[string]bool{}
 	for _, relative := range paths {
 		path := filepath.Join(runtimeRoot, relative)
-		info, err := os.Stat(path)
+		info, err := os.Lstat(path)
 		if err != nil {
-			return "", fmt.Errorf("fingerprint Docker build input %s: %w", relative, err)
+			return fmt.Errorf("fingerprint Docker build input %s: %w", relative, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("fingerprint Docker build input %s: symbolic links are not supported", relative)
 		}
 		if info.Mode().IsRegular() {
-			if runtimebundle.IncludeSource(relative, false) {
+			if runtimebundle.IncludeSource(relative, false) && !seen[path] {
 				files = append(files, path)
+				seen[path] = true
 			}
 			continue
 		}
@@ -165,37 +180,45 @@ func dockerBuildSignature(runtimeRoot string, plan dockerBuildPlan) (string, err
 				}
 				return nil
 			}
-			if entry.Type().IsRegular() {
+			if entry.Type()&os.ModeSymlink != 0 {
+				return fmt.Errorf("fingerprint Docker build input %s: symbolic links are not supported", runtimeRelative)
+			}
+			if entry.Type().IsRegular() && !seen[candidate] {
 				files = append(files, candidate)
+				seen[candidate] = true
 			}
 			return nil
 		})
 		if err != nil {
-			return "", fmt.Errorf("fingerprint Docker build input %s: %w", relative, err)
+			return fmt.Errorf("fingerprint Docker build input %s: %w", relative, err)
 		}
 	}
 	sort.Strings(files)
 	for _, path := range files {
 		relative, err := filepath.Rel(runtimeRoot, path)
 		if err != nil {
-			return "", err
+			return err
 		}
-		if strings.HasPrefix(relative, "..") {
-			return "", fmt.Errorf("Docker build input escaped runtime root: %s", path)
+		if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("docker build input escaped runtime root: %s", path)
 		}
-		fmt.Fprintln(hash, filepath.ToSlash(relative))
+		info, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(output, "%s %o\n", filepath.ToSlash(relative), info.Mode().Perm())
 		file, err := os.Open(path)
 		if err != nil {
-			return "", err
+			return err
 		}
-		_, copyErr := io.Copy(hash, file)
+		_, copyErr := io.Copy(output, file)
 		closeErr := file.Close()
 		if copyErr != nil {
-			return "", copyErr
+			return copyErr
 		}
 		if closeErr != nil {
-			return "", closeErr
+			return closeErr
 		}
 	}
-	return fmt.Sprintf("%x", hash.Sum(nil)), nil
+	return nil
 }

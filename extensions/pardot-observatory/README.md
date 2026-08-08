@@ -11,7 +11,9 @@ It demonstrates:
 - asynchronous, cancellable jobs with live logs;
 - SHA-256 verified Markdown artifact export;
 - optional persistent-state and shared-folder grants;
-- a restricted field console whose commands are implemented by the extension.
+- a restricted field console whose commands are implemented by the extension;
+- bounded jobs, notes, sessions, logs, and artifacts suitable for a long-lived
+  sidecar.
 
 See [the extension authoring guide](../../docs/extensions.md) and
 [protocol reference](../../docs/connectors.md).

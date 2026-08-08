@@ -219,7 +219,7 @@ func TestCorePresetsContainNoHardcodedExtensions(t *testing.T) {
 func TestProfileNormalizationDoesNotInventOrDiscardExtensions(t *testing.T) {
 	profile := ProfileFromPreset(Presets[0], time.Now())
 	profile.Connectors = []ConnectorConfig{
-		{ID: "third-party", Name: "Third Party", Enabled: true, Container: "third-party", Network: "network", Endpoint: "http://third-party:7777"},
+		{ID: "third-party", Name: "Third Party", Enabled: true, External: true, Container: "third-party", Network: "external", Endpoint: "http://third-party:7777"},
 	}
 	normalizeProfile(&profile)
 	if len(profile.Connectors) != 1 || profile.Connectors[0].ID != "third-party" {
@@ -239,8 +239,51 @@ func TestLegacyRuntimeNamesMigrateToArrakis(t *testing.T) {
 	if profile.Name != "Golden Path" || profile.Terminal.DockerUser != "fremen" || profile.Terminal.DockerWorkdir != "/home/fremen/projects/example" {
 		t.Fatalf("legacy runtime identity was not migrated: %#v", profile)
 	}
-	if profile.Connectors[0].Network != "arrakis-shield-wall" {
+	if profile.Connectors[0].Network != ExtensionControlNetworkName("test-extension") {
 		t.Fatalf("legacy connector vocabulary was not migrated: %#v", profile.Connectors[0])
+	}
+}
+
+func TestManagedExtensionIsolationValuesAreStrict(t *testing.T) {
+	for _, user := range []string{"", "root", "0", "0:0", "name:10001", "10001:0"} {
+		if ValidExtensionContainerUser(user) {
+			t.Fatalf("unsafe extension user %q was accepted", user)
+		}
+	}
+	for _, user := range []string{"10001", "10001:10001", "65532:65532"} {
+		if !ValidExtensionContainerUser(user) {
+			t.Fatalf("safe numeric extension user %q was rejected", user)
+		}
+	}
+	valid := "/run:rw,noexec,nosuid,nodev,size=8m"
+	if err := ValidateExtensionTmpfs(valid); err != nil {
+		t.Fatalf("safe tmpfs was rejected: %v", err)
+	}
+	for _, value := range []string{
+		"/run", "/run:rw,size=8m", "/run:rw,noexec,nosuid,nodev", "/tmp:rw,noexec,nosuid,nodev,size=8m",
+		"/proc/work:rw,noexec,nosuid,nodev,size=8m", "/run:rw,exec,nosuid,nodev,size=8m",
+	} {
+		if err := ValidateExtensionTmpfs(value); err == nil {
+			t.Fatalf("unsafe tmpfs %q was accepted", value)
+		}
+	}
+	if err := ValidateExtensionEnvironment("REGION=arrakeen"); err != nil {
+		t.Fatalf("safe environment was rejected: %v", err)
+	}
+	for _, value := range []string{"MISSING_VALUE", "1BAD=value", "LISAN_EXTENSION_ID=spoof", "BAD=one\x00two"} {
+		if err := ValidateExtensionEnvironment(value); err == nil {
+			t.Fatalf("unsafe environment %q was accepted", value)
+		}
+	}
+	for _, value := range []string{"alpine", "registry.example.test:5000/team/image:3", "image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} {
+		if err := ValidateExtensionImageArgument(value); err != nil {
+			t.Fatalf("safe image %q was rejected: %v", value, err)
+		}
+	}
+	for _, value := range []string{"", "--privileged", " image:1", "image:1\n--privileged", "image name:1"} {
+		if err := ValidateExtensionImageArgument(value); err == nil {
+			t.Fatalf("unsafe image %q was accepted", value)
+		}
 	}
 }
 

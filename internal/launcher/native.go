@@ -11,9 +11,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"lisanalgaib/internal/appconfig"
+	"lisanalgaib/internal/childproc"
 	"lisanalgaib/internal/cliout"
 	"lisanalgaib/internal/connectors"
 )
@@ -22,8 +24,33 @@ import (
 // runs the platform binary packed beside each bundle; a source checkout may
 // fall back to `go run` for extension development.
 type NativeRuntime struct {
-	processes []*exec.Cmd
+	processes []*nativeProcess
 	temporary []string
+}
+
+type nativeProcess struct {
+	command *exec.Cmd
+	done    chan struct{}
+	mu      sync.RWMutex
+	err     error
+}
+
+func superviseNativeProcess(command *exec.Cmd) *nativeProcess {
+	process := &nativeProcess{command: command, done: make(chan struct{})}
+	go func() {
+		err := command.Wait()
+		process.mu.Lock()
+		process.err = err
+		process.mu.Unlock()
+		close(process.done)
+	}()
+	return process
+}
+
+func (process *nativeProcess) waitError() error {
+	process.mu.RLock()
+	defer process.mu.RUnlock()
+	return process.err
 }
 
 func StartNativeConnectors(ctx context.Context, runtimeRoot string, profile appconfig.Profile, output io.Writer) (appconfig.Profile, *NativeRuntime, error) {
@@ -59,13 +86,15 @@ func StartNativeConnectors(ctx context.Context, runtimeRoot string, profile appc
 		}
 		command.Stdout = output
 		command.Stderr = output
+		childproc.Configure(command)
 		if err := command.Start(); err != nil {
 			return fail(fmt.Errorf("start native extension %s: %w", connector.ID, err))
 		}
-		runtimeState.processes = append(runtimeState.processes, command)
+		process := superviseNativeProcess(command)
+		runtimeState.processes = append(runtimeState.processes, process)
 		connector.Endpoint = "http://" + listen
 		connector.Network = "native-loopback"
-		if err := waitForNativeExtension(ctx, *connector, command); err != nil {
+		if err := waitForNativeExtension(ctx, *connector, process); err != nil {
 			return fail(err)
 		}
 		if output != nil {
@@ -112,6 +141,7 @@ func nativeExtensionCommand(ctx context.Context, root string, connector appconfi
 	binary := filepath.Join(temporary, binaryName)
 	build := exec.CommandContext(ctx, "go", "build", "-trimpath", "-buildvcs=false", "-o", binary, "./"+packagePath)
 	build.Dir = root
+	childproc.Configure(build)
 	if output, buildErr := build.CombinedOutput(); buildErr != nil {
 		_ = os.RemoveAll(temporary)
 		return nil, "", fmt.Errorf("build native extension %s: %w: %s", connector.ID, buildErr, strings.TrimSpace(string(output)))
@@ -137,9 +167,7 @@ func nativeExtensionEnvironment(connector appconfig.ConnectorConfig, listen stri
 	if connector.Grants.SharedRead {
 		sharedDirectory = strings.TrimSpace(os.Getenv("LISAN_SHARED_DIR"))
 	}
-	for _, value := range connector.Environment {
-		environment = append(environment, value)
-	}
+	environment = append(environment, connector.Environment...)
 	environment = append(environment,
 		"LISAN_EXTENSION_ID="+connector.ID,
 		"LISAN_EXTENSION_LISTEN="+listen,
@@ -149,7 +177,7 @@ func nativeExtensionEnvironment(connector appconfig.ConnectorConfig, listen stri
 	return environment, nil
 }
 
-func waitForNativeExtension(ctx context.Context, connector appconfig.ConnectorConfig, command *exec.Cmd) error {
+func waitForNativeExtension(ctx context.Context, connector appconfig.ConnectorConfig, process *nativeProcess) error {
 	deadline := time.NewTimer(12 * time.Second)
 	defer deadline.Stop()
 	ticker := time.NewTicker(100 * time.Millisecond)
@@ -162,12 +190,14 @@ func waitForNativeExtension(ctx context.Context, connector appconfig.ConnectorCo
 			}
 			return nil
 		}
-		if command.ProcessState != nil && command.ProcessState.Exited() {
-			return fmt.Errorf("native extension %s exited before becoming ready", connector.ID)
-		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-process.done:
+			if err := process.waitError(); err != nil {
+				return fmt.Errorf("native extension %s exited before becoming ready: %w", connector.ID, err)
+			}
+			return fmt.Errorf("native extension %s exited before becoming ready", connector.ID)
 		case <-deadline.C:
 			return fmt.Errorf("native extension %s did not become ready", connector.ID)
 		case <-ticker.C:
@@ -181,14 +211,20 @@ func (runtimeState *NativeRuntime) Close() error {
 	}
 	var result error
 	for index := len(runtimeState.processes) - 1; index >= 0; index-- {
-		command := runtimeState.processes[index]
+		process := runtimeState.processes[index]
+		command := process.command
 		if command.Process == nil {
 			continue
 		}
-		if err := command.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		select {
+		case <-process.done:
+			continue
+		default:
+		}
+		if err := command.Cancel(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 			result = errors.Join(result, err)
 		}
-		_ = command.Wait()
+		<-process.done
 	}
 	runtimeState.processes = nil
 	for _, directory := range runtimeState.temporary {

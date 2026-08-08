@@ -10,10 +10,12 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,6 +31,92 @@ const (
 )
 
 var configIdentifier = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+var extensionTmpfsSize = regexp.MustCompile(`^size=[1-9][0-9]*[kKmMgG]?$`)
+var extensionEnvironmentName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var extensionImageArgument = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/:@+-]*$`)
+
+// ExtensionControlNetworkName gives each managed extension its own private
+// internal network. The workspace joins each network as needed, but extensions
+// never share a broadcast/DNS domain with one another.
+func ExtensionControlNetworkName(id string) string {
+	return "lisan-extension-control-" + id
+}
+
+// ValidExtensionContainerUser requires an explicit non-root numeric identity.
+// User names are image-defined and therefore cannot prove that an extension is
+// non-root before its image starts.
+func ValidExtensionContainerUser(value string) bool {
+	parts := strings.Split(value, ":")
+	if len(parts) < 1 || len(parts) > 2 {
+		return false
+	}
+	for _, part := range parts {
+		parsed, err := strconv.ParseUint(part, 10, 31)
+		if err != nil || parsed == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidateExtensionImageArgument rejects values that Docker could parse as a
+// run option, as well as whitespace and control characters. Docker remains the
+// authority for the complete image-reference grammar.
+func ValidateExtensionImageArgument(value string) error {
+	if value == "" || len(value) > 255 || strings.TrimSpace(value) != value || !extensionImageArgument.MatchString(value) {
+		return fmt.Errorf("invalid or unsafe extension image reference")
+	}
+	return nil
+}
+
+// ValidateExtensionEnvironment prevents malformed entries and reserves the
+// LISAN_EXTENSION_ namespace for lifecycle paths and identity supplied by the
+// core after all bundle-defined values.
+func ValidateExtensionEnvironment(value string) error {
+	name, _, ok := strings.Cut(value, "=")
+	if !ok || !extensionEnvironmentName.MatchString(name) || strings.HasPrefix(name, "LISAN_EXTENSION_") || strings.ContainsRune(value, '\x00') {
+		return fmt.Errorf("invalid or reserved extension environment entry")
+	}
+	return nil
+}
+
+// ValidateExtensionTmpfs accepts only bounded, non-executable Linux tmpfs
+// mounts. It deliberately rejects kernel/device paths and the default /tmp
+// mount, which Lisan owns itself.
+func ValidateExtensionTmpfs(value string) error {
+	parts := strings.SplitN(strings.TrimSpace(value), ":", 2)
+	if len(parts) != 2 || !strings.HasPrefix(parts[0], "/") || path.Clean(parts[0]) != parts[0] {
+		return fmt.Errorf("tmpfs %q must use a clean absolute target and explicit options", value)
+	}
+	target := parts[0]
+	for _, forbidden := range []string{"/", "/tmp", "/proc", "/sys", "/dev"} {
+		if target == forbidden || strings.HasPrefix(target, forbidden+"/") {
+			return fmt.Errorf("tmpfs target %q is reserved", target)
+		}
+	}
+	required := map[string]bool{"rw": false, "noexec": false, "nosuid": false, "nodev": false, "size": false}
+	seen := map[string]bool{}
+	for _, option := range strings.Split(parts[1], ",") {
+		if seen[option] {
+			return fmt.Errorf("tmpfs %q repeats option %q", value, option)
+		}
+		seen[option] = true
+		switch {
+		case option == "rw", option == "noexec", option == "nosuid", option == "nodev":
+			required[option] = true
+		case extensionTmpfsSize.MatchString(option):
+			required["size"] = true
+		default:
+			return fmt.Errorf("tmpfs %q has unsafe or unsupported option %q", value, option)
+		}
+	}
+	for option, present := range required {
+		if !present {
+			return fmt.Errorf("tmpfs %q requires %s", value, option)
+		}
+	}
+	return nil
+}
 
 type Category string
 
@@ -673,6 +761,9 @@ func normalizeConnector(connector *ConnectorConfig) {
 	if connector.Managed && connector.User == "" {
 		connector.User = "10001:10001"
 	}
+	if connector.Managed {
+		connector.Network = ExtensionControlNetworkName(connector.ID)
+	}
 	if connector.Network == "" {
 		connector.Network = "arrakis-shield-wall"
 	}
@@ -741,11 +832,32 @@ func validateProfile(profile Profile, requireID bool) error {
 		if connector.Managed && connector.External {
 			return fmt.Errorf("managed extension %q cannot use an external runtime", connector.ID)
 		}
+		if !connector.Managed && !connector.External {
+			return fmt.Errorf("extension %q must use a managed bundle or external HTTP endpoint", connector.ID)
+		}
 		if connector.Managed && (connector.Image == "" || connector.NativeExecutable == "") {
 			return fmt.Errorf("managed extension %q requires image and native_executable", connector.ID)
 		}
-		if connector.Managed && !validContainerUser(connector.User) {
+		if connector.Managed {
+			if err := ValidateExtensionImageArgument(connector.Image); err != nil {
+				return fmt.Errorf("managed extension %q has an invalid image reference", connector.ID)
+			}
+		}
+		if connector.Managed && !ValidExtensionContainerUser(connector.User) {
 			return fmt.Errorf("managed extension %q has invalid container user %q", connector.ID, connector.User)
+		}
+		if connector.Managed && connector.Network != ExtensionControlNetworkName(connector.ID) {
+			return fmt.Errorf("managed extension %q must use its dedicated control network", connector.ID)
+		}
+		for _, tmpfs := range connector.Tmpfs {
+			if err := ValidateExtensionTmpfs(tmpfs); err != nil {
+				return fmt.Errorf("managed extension %q: %w", connector.ID, err)
+			}
+		}
+		for _, value := range connector.Environment {
+			if err := ValidateExtensionEnvironment(value); err != nil {
+				return fmt.Errorf("managed extension %q has invalid or reserved environment entry", connector.ID)
+			}
 		}
 		if connector.Grants.SharedWrite && !connector.Grants.SharedRead {
 			return fmt.Errorf("managed extension %q cannot grant shared_write without shared_read", connector.ID)
@@ -777,19 +889,6 @@ func knownOption(category Category, id string) bool {
 		}
 	}
 	return false
-}
-
-func validContainerUser(value string) bool {
-	parts := strings.Split(value, ":")
-	if len(parts) > 2 {
-		return false
-	}
-	for _, part := range parts {
-		if !configIdentifier.MatchString(part) {
-			return false
-		}
-	}
-	return true
 }
 
 func decodeJSON(data []byte, destination any) error {

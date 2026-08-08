@@ -181,9 +181,7 @@ func (m *Model) rows() []row {
 	connectors := make([]row, 0, len(m.working.Connectors))
 	for index, connector := range m.working.Connectors {
 		connectors = append(connectors, row{kind: rowConnector, label: connector.Name, description: connector.Description + " · disabled by default", connector: index})
-		for _, grant := range requestedGrantRows(connector, index) {
-			connectors = append(connectors, grant)
-		}
+		connectors = append(connectors, requestedGrantRows(connector, index)...)
 	}
 	rows = m.appendDropdown(rows, "connectors", "EXTENSION CONTAINERS", connectors)
 
@@ -293,11 +291,9 @@ func (m *Model) applyPreset(index int) {
 	preset := appconfig.Presets[index]
 	configuredConnectors := m.working.Clone().Connectors
 	m.working = appconfig.ProfileFromPreset(preset, time.Now())
-	for _, connector := range configuredConnectors {
-		// Extension lifecycle and permissions are deliberately independent from
-		// core presets. Loading a preset never enables a sidecar or broadens it.
-		m.working.Connectors = append(m.working.Connectors, connector)
-	}
+	// Extension lifecycle and permissions are deliberately independent from
+	// core presets. Loading a preset never enables a sidecar or broadens it.
+	m.working.Connectors = append(m.working.Connectors, configuredConnectors...)
 	m.source = "preset:" + preset.ID
 	m.status = preset.Name + " loaded; press Ctrl-S to save and activate"
 }

@@ -10,12 +10,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
-	"strings"
 	"time"
 
 	"lisanalgaib/internal/connectors"
+	"lisanalgaib/internal/files"
 )
 
 var ErrNotFound = errors.New("extension resource not found")
@@ -150,7 +151,9 @@ func Handler(backend Backend) http.Handler {
 			mediaType = "application/octet-stream"
 		}
 		writer.Header().Set("Content-Type", mediaType)
-		writer.Header().Set("Content-Disposition", `attachment; filename="`+strings.ReplaceAll(payload.Metadata.Name, `"`, "")+`"`)
+		writer.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{
+			"filename": files.SafeName(payload.Metadata.Name, "artifact.bin"),
+		}))
 		writer.WriteHeader(http.StatusOK)
 		_, _ = writer.Write(payload.Data)
 	})

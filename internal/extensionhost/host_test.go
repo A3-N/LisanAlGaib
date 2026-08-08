@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -68,6 +69,15 @@ func TestProtocolV3HandlerRejectsInvalidBackendData(t *testing.T) {
 	Handler(backend).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v3/manifest", nil))
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("invalid backend manifest returned %d", response.Code)
+	}
+}
+
+func TestProtocolV3HandlerSanitizesArtifactFilename(t *testing.T) {
+	response := httptest.NewRecorder()
+	Handler(&testBackend{}).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v3/jobs/job-1/artifacts/report", nil))
+	mediaType, parameters, err := mime.ParseMediaType(response.Header().Get("Content-Disposition"))
+	if err != nil || mediaType != "attachment" || parameters["filename"] != "report_.md" {
+		t.Fatalf("unsafe artifact disposition %q: type=%q filename=%q err=%v", response.Header().Get("Content-Disposition"), mediaType, parameters["filename"], err)
 	}
 }
 

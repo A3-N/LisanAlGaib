@@ -52,7 +52,7 @@ func TestConfiguredRuntimeRequiresComposeAndDockerfile(t *testing.T) {
 
 func TestSharedDirectoryLivesAtSourceRoot(t *testing.T) {
 	root := t.TempDir()
-	shared, err := prepareSharedDirectory(root, false)
+	shared, err := PrepareSharedDirectory(root, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestSharedDirectoryLivesAtSourceRoot(t *testing.T) {
 func TestInstalledSharedDirectorySurvivesBesideRuntime(t *testing.T) {
 	configRoot := t.TempDir()
 	runtimeRoot := filepath.Join(configRoot, "runtime")
-	shared, err := prepareSharedDirectory(runtimeRoot, true)
+	shared, err := PrepareSharedDirectory(runtimeRoot, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,5 +76,50 @@ func TestInstalledSharedDirectorySurvivesBesideRuntime(t *testing.T) {
 	}
 	if strings.HasPrefix(shared, runtimeRoot+string(filepath.Separator)) {
 		t.Fatalf("installed shared directory would be replaced with runtime: %q", shared)
+	}
+}
+
+func TestSharedDirectoryRejectsSymlinkTargets(t *testing.T) {
+	root := t.TempDir()
+	target := t.TempDir()
+	if err := os.Symlink(target, filepath.Join(root, "shared")); err != nil {
+		t.Skipf("symbolic links unavailable: %v", err)
+	}
+	if _, err := PrepareSharedDirectory(root, false); err == nil || !strings.Contains(err.Error(), "real directory") {
+		t.Fatalf("shared symlink target was accepted: %v", err)
+	}
+}
+
+func TestSharedDirectoryRejectsDockerMountDelimiter(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "runtime,unsafe")
+	if _, err := PrepareSharedDirectory(root, false); err == nil || !strings.Contains(err.Error(), "unsupported by Docker mounts") {
+		t.Fatalf("expected Docker mount delimiter error, got %v", err)
+	}
+}
+
+func TestWorkspaceComposeExposesOnlyTheSharedHostDirectory(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compose := string(data)
+	for _, required := range []string{
+		"privileged: false",
+		"source: ${LISAN_SHARED_DIR:-./shared}",
+		"target: /home/fremen/shared",
+		"create_host_path: false",
+		"- usul:/home/fremen",
+	} {
+		if !strings.Contains(compose, required) {
+			t.Fatalf("workspace boundary omits %q", required)
+		}
+	}
+	if count := strings.Count(compose, "type: bind"); count != 1 {
+		t.Fatalf("workspace has %d host bind mounts, want exactly one", count)
+	}
+	for _, forbidden := range []string{"/var/run/docker.sock", "docker.sock", "privileged: true", "network_mode: host", "pid: host", "ipc: host", "/dev/"} {
+		if strings.Contains(compose, forbidden) {
+			t.Fatalf("workspace compose exposes forbidden capability %q", forbidden)
+		}
 	}
 }

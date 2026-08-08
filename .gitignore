@@ -1,5 +1,6 @@
 # Local toolchains, caches, and build outputs
 /.toolchain/
+/.cache/
 /bin/
 /build/
 /dist/
@@ -11,6 +12,20 @@
 *.test
 *.exe
 *.prof
+*.coverprofile
+*.tmp
+
+# Common extension/tool caches stay local even when contributors use other
+# languages inside a bundle.
+**/node_modules/
+**/target/
+**/__pycache__/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.venv/
+.idea/
+.vscode/
 
 # Runtime and editor state
 *.log

@@ -15,6 +15,12 @@ import (
 
 const archivePath = "assets/runtime.tar.gz"
 
+const (
+	maxRuntimeEntries      = 10_000
+	maxRuntimeEntryBytes   = 128 << 20
+	maxRuntimeArchiveBytes = 512 << 20
+)
+
 var sourceRoots = []string{".dockerignore", "Dockerfile", "compose.yaml", "go.mod", "go.sum", "cmd", "internal", "docker", "extensions"}
 
 // assets contains the generated release runtime when scripts/build-release is
@@ -71,12 +77,18 @@ func Extract(destination string) error {
 }
 
 func extractReader(archive io.Reader, destination string) error {
+	return extractReaderWithLimits(archive, destination, maxRuntimeEntryBytes, maxRuntimeArchiveBytes)
+}
+
+func extractReaderWithLimits(archive io.Reader, destination string, maxEntryBytes, maxArchiveBytes int64) error {
 	gz, err := gzip.NewReader(archive)
 	if err != nil {
 		return fmt.Errorf("open embedded runtime: %w", err)
 	}
 	defer gz.Close()
 	reader := tar.NewReader(gz)
+	var entries int
+	var extracted int64
 	for {
 		header, nextErr := reader.Next()
 		if errors.Is(nextErr, io.EOF) {
@@ -85,6 +97,16 @@ func extractReader(archive io.Reader, destination string) error {
 		if nextErr != nil {
 			return fmt.Errorf("read embedded runtime: %w", nextErr)
 		}
+		entries++
+		if entries > maxRuntimeEntries {
+			return fmt.Errorf("embedded runtime exceeds %d entries", maxRuntimeEntries)
+		}
+		if header.Size < 0 || header.Size > maxEntryBytes || extracted > maxArchiveBytes-header.Size {
+			return fmt.Errorf("embedded runtime entry %q exceeds extraction limits", header.Name)
+		}
+		if header.Typeflag != tar.TypeReg && header.Size != 0 {
+			return fmt.Errorf("embedded runtime entry %q has data for a non-file type", header.Name)
+		}
 		clean := filepath.Clean(filepath.FromSlash(header.Name))
 		if clean == "." || filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("embedded runtime contains unsafe path %q", header.Name)
@@ -92,20 +114,22 @@ func extractReader(archive io.Reader, destination string) error {
 		target := filepath.Join(destination, clean)
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, fs.FileMode(header.Mode)&0o755); err != nil {
+			if err := os.MkdirAll(target, fs.FileMode(header.Mode&0o755)); err != nil {
 				return err
 			}
 		case tar.TypeReg:
+			extracted += header.Size
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return err
 			}
-			file, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, fs.FileMode(header.Mode)&0o755)
+			file, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, fs.FileMode(header.Mode&0o755))
 			if err != nil {
 				return err
 			}
-			_, copyErr := io.Copy(file, reader)
+			_, copyErr := io.CopyN(file, reader, header.Size)
 			closeErr := file.Close()
 			if copyErr != nil {
+				_ = os.Remove(target)
 				return copyErr
 			}
 			if closeErr != nil {

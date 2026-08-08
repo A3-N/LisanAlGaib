@@ -30,6 +30,21 @@ func TestResolveWithinRejectsEscapingSymlink(t *testing.T) {
 	}
 }
 
+func TestSafeNameIsPortableAndCannotNavigate(t *testing.T) {
+	for input, expected := range map[string]string{
+		"../report.md":        "report.md",
+		`..\windows.txt`:      "windows.txt",
+		"..":                  "artifact.bin",
+		"CON.txt":             "_CON.txt",
+		"survey:final?.md":    "survey_final_.md",
+		"trailing dots...   ": "trailing dots",
+	} {
+		if got := SafeName(input, "artifact.bin"); got != expected {
+			t.Fatalf("SafeName(%q) = %q, want %q", input, got, expected)
+		}
+	}
+}
+
 func mustWrite(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {

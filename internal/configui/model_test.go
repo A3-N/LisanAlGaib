@@ -187,8 +187,8 @@ func TestSavedProfileEnterLoadsAndCtrlSSaves(t *testing.T) {
 func TestPresetPreservesThirdPartyExtensionDefinitions(t *testing.T) {
 	model := New(appconfig.DefaultDocument(time.Now()), filepath.Join(t.TempDir(), "config.json"))
 	model.working.Connectors = append(model.working.Connectors, appconfig.ConnectorConfig{
-		ID: "custom", Name: "Custom", Enabled: true, Managed: false,
-		Container: "custom", Network: "arrakis-shield-wall", Endpoint: "http://custom:7777",
+		ID: "custom", Name: "Custom", Enabled: true, External: true,
+		Container: "custom", Network: "external", Endpoint: "http://custom:7777",
 	})
 	model.applyPreset(3)
 	if len(model.working.Connectors) != 1 || model.working.Connectors[0].ID != "custom" {

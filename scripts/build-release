@@ -6,6 +6,7 @@ archive="$project_root/internal/runtimebundle/assets/runtime.tar.gz"
 dist="$project_root/dist"
 active_goos=
 active_goarch=
+active_output=
 cd "$project_root"
 
 cleanup() {
@@ -13,6 +14,7 @@ cleanup() {
 	if [ -n "$active_goos" ]; then
 		"$project_root/scripts/go" run ./cmd/lisan-runtime-pack clean "$project_root" "$active_goos" "$active_goarch" >/dev/null 2>&1 || true
 	fi
+	[ -z "$active_output" ] || rm -f -- "$active_output"
 }
 trap cleanup EXIT
 
@@ -23,13 +25,17 @@ build() {
 	goarch=$2
 	extension=$3
 	output="$dist/lisan_${goos}_${goarch}${extension}"
+	temporary_output="$output.tmp.$$"
 	active_goos=$goos
 	active_goarch=$goarch
+	active_output=$temporary_output
 	printf 'Building %s/%s -> %s\n' "$goos" "$goarch" "$output"
 	"$project_root/scripts/go" run ./cmd/lisan-runtime-pack prepare "$project_root" "$goos" "$goarch"
 	"$project_root/scripts/go" run ./cmd/lisan-runtime-pack "$project_root" "$archive"
 	CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch \
-		"$project_root/scripts/go" build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' -o "$output" ./cmd/lisan
+		"$project_root/scripts/go" build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' -o "$temporary_output" ./cmd/lisan
+	mv -f -- "$temporary_output" "$output"
+	active_output=
 	unlink "$archive"
 	"$project_root/scripts/go" run ./cmd/lisan-runtime-pack clean "$project_root" "$goos" "$goarch"
 	active_goos=
@@ -45,10 +51,14 @@ build windows arm64 .exe
 
 (
 	cd "$dist"
+	set -- \
+		lisan_linux_amd64 lisan_linux_arm64 \
+		lisan_darwin_amd64 lisan_darwin_arm64 \
+		lisan_windows_amd64.exe lisan_windows_arm64.exe
 	if command -v sha256sum >/dev/null 2>&1; then
-		sha256sum lisan_* > SHA256SUMS
+		sha256sum "$@" > SHA256SUMS
 	else
-		shasum -a 256 lisan_* > SHA256SUMS
+		shasum -a 256 "$@" > SHA256SUMS
 	fi
 )
 

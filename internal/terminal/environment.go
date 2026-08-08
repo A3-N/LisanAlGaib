@@ -6,6 +6,20 @@ import (
 	"lisanalgaib/internal/textsafe"
 )
 
+const maxTerminalDimension = 1000
+
+// terminalDimension keeps emulator allocations and PTY's uint16 dimensions
+// bounded even if a terminal backend reports corrupt window geometry.
+func terminalDimension(value int) uint16 {
+	if value < 2 {
+		return 2
+	}
+	if value > maxTerminalDimension {
+		return maxTerminalDimension
+	}
+	return uint16(value)
+}
+
 func cleanTitle(value string) string {
 	return textsafe.Label(value, 120)
 }

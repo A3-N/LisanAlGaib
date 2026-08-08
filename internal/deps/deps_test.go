@@ -88,7 +88,7 @@ func TestDockerTerminalRequiresConfiguredShell(t *testing.T) {
 	}
 }
 
-func TestAgentSelectionRequiresOnlySelectedAgentAndInstaller(t *testing.T) {
+func TestAgentSelectionRequiresOnlySelectedAgent(t *testing.T) {
 	profile := appconfig.ProfileFromPreset(appconfig.Presets[3], time.Now())
 	profile.Set(appconfig.Features, "agents", true)
 	profile.Set(appconfig.Agents, "codex", true)
@@ -97,8 +97,21 @@ func TestAgentSelectionRequiresOnlySelectedAgentAndInstaller(t *testing.T) {
 	for _, item := range required {
 		seen[item.ID] = true
 	}
-	if !seen["codex"] || !seen["npm"] || seen["bash"] || seen["claude"] || seen["nvim"] {
+	if !seen["codex"] || seen["npm"] || seen["bash"] || seen["claude"] || seen["nvim"] {
 		t.Fatalf("agent requirements leaked disabled components: %#v", required)
+	}
+}
+
+func TestAgentInstallerPrerequisitesAreConditional(t *testing.T) {
+	missing := []requirement{{ID: "codex", Command: "codex"}}
+	available := func(string) (string, error) { return "/available", nil }
+	if got := withInstallerPrerequisites("linux", missing, available); len(got) != 1 {
+		t.Fatalf("available npm still became a configured requirement: %#v", got)
+	}
+	unavailable := func(string) (string, error) { return "", os.ErrNotExist }
+	got := withInstallerPrerequisites("linux", missing, unavailable)
+	if len(got) != 2 || got[1].ID != "npm" {
+		t.Fatalf("missing npm was not added for a missing Codex installer: %#v", got)
 	}
 }
 

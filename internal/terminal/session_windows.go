@@ -44,7 +44,8 @@ func Start(spec Spec, width, height int) (*Session, error) {
 	if strings.TrimSpace(spec.ID) == "" || strings.TrimSpace(spec.Path) == "" {
 		return nil, errors.New("terminal session requires an id and executable")
 	}
-	emulator := vt.NewSafeEmulator(max(width, 2), max(height, 2))
+	width, height = int(terminalDimension(width)), int(terminalDimension(height))
+	emulator := vt.NewSafeEmulator(width, height)
 	if spec.Foreground != nil {
 		emulator.SetDefaultForegroundColor(spec.Foreground)
 		emulator.SetForegroundColor(spec.Foreground)
@@ -112,7 +113,8 @@ func (s *Session) Cursor() Cursor {
 func (s *Session) Resize(width, height int) error {
 	s.screenMu.Lock()
 	defer s.screenMu.Unlock()
-	s.emulator.Resize(max(width, 2), max(height, 2))
+	width, height = int(terminalDimension(width)), int(terminalDimension(height))
+	s.emulator.Resize(width, height)
 	s.signalFrame()
 	return nil
 }

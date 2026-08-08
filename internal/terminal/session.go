@@ -65,8 +65,8 @@ func Start(spec Spec, width, height int) (*Session, error) {
 	if strings.TrimSpace(spec.Path) == "" {
 		return nil, errors.New("terminal session requires an executable")
 	}
-	width = max(width, 2)
-	height = max(height, 2)
+	ptyWidth, ptyHeight := terminalDimension(width), terminalDimension(height)
+	width, height = int(ptyWidth), int(ptyHeight)
 
 	emulator := vt.NewSafeEmulator(width, height)
 	if spec.Foreground != nil {
@@ -137,7 +137,7 @@ func Start(spec Spec, width, height int) (*Session, error) {
 		},
 	})
 
-	ptmx, err := pty.StartWithSize(command, &pty.Winsize{Rows: uint16(height), Cols: uint16(width)})
+	ptmx, err := pty.StartWithSize(command, &pty.Winsize{Rows: ptyHeight, Cols: ptyWidth})
 	if err != nil {
 		_ = emulator.Close()
 		return nil, err
@@ -182,8 +182,8 @@ func (s *Session) Cursor() Cursor {
 }
 
 func (s *Session) Resize(width, height int) error {
-	width = max(width, 2)
-	height = max(height, 2)
+	ptyWidth, ptyHeight := terminalDimension(width), terminalDimension(height)
+	width, height = int(ptyWidth), int(ptyHeight)
 
 	s.screenMu.Lock()
 	defer s.screenMu.Unlock()
@@ -196,7 +196,7 @@ func (s *Session) Resize(width, height int) error {
 	// immediately from the signal handler, including setting scroll margins for
 	// the new size, so the virtual screen must already match those dimensions.
 	s.emulator.Resize(width, height)
-	if err := pty.Setsize(s.pty, &pty.Winsize{Rows: uint16(height), Cols: uint16(width)}); err != nil {
+	if err := pty.Setsize(s.pty, &pty.Winsize{Rows: ptyHeight, Cols: ptyWidth}); err != nil {
 		s.emulator.Resize(oldWidth, oldHeight)
 		return err
 	}
@@ -346,7 +346,7 @@ func (s *Session) applyOutput(data []byte) {
 			if s.pty != nil {
 				// Ask the full-screen child for a clean repaint after the damaged
 				// output chunk was dropped.
-				_ = pty.Setsize(s.pty, &pty.Winsize{Rows: uint16(s.height), Cols: uint16(s.width)})
+				_ = pty.Setsize(s.pty, &pty.Winsize{Rows: terminalDimension(s.height), Cols: terminalDimension(s.width)})
 			}
 		}
 	}()

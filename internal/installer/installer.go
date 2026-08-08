@@ -366,7 +366,7 @@ func syncLisanNvimAssets(sourceRoot, nvimTarget string) error {
 	if !strings.Contains(updated, "lisan.header") {
 		updated = strings.Replace(updated, "M.nvdash = {", "M.nvdash = {\n  header = function() return require(\"lisan.header\").lines() end,", 1)
 		if updated == string(data) {
-			return errors.New("Lisan NvChad config has no nvdash block")
+			return errors.New("installed NvChad config has no nvdash block")
 		}
 	}
 	if !strings.Contains(updated, `keys = "fr"`) {

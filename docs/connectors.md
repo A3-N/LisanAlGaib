@@ -136,6 +136,9 @@ Input uses `{"input":"help\n"}` and resize uses
 `{"rows":30,"columns":120}`. Each response returns the latest bounded session
 state. Status is `open`, `closed`, or `failed`. This transport does not grant a
 shell: the extension decides which input is valid and where it executes.
+The core keeps one live interactive session per extension and closes it when it
+is replaced; services should still bound their own session count and expire
+abandoned sessions defensively.
 
 ## Limits
 

@@ -18,22 +18,19 @@ import (
 )
 
 var dockerName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
-var dockerEnvironmentName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-type connectorSyncResult struct {
-	started []appconfig.ConnectorConfig
-}
-
-func syncConnectors(ctx context.Context, runtimeRoot, sharedRoot string, configured []appconfig.ConnectorConfig, stdout, stderr io.Writer) (connectorSyncResult, error) {
-	var result connectorSyncResult
+func syncConnectors(ctx context.Context, runtimeRoot, sharedRoot string, configured []appconfig.ConnectorConfig, stdout, stderr io.Writer) error {
+	if err := stopUnconfiguredManagedConnectors(ctx, configured, stdout, stderr); err != nil {
+		return err
+	}
 	for _, connector := range configured {
 		if err := validateConnector(connector); err != nil {
-			return result, err
+			return err
 		}
 		if !connector.Enabled {
 			if connector.Managed {
 				if err := stopManagedConnector(ctx, connector, stdout, stderr); err != nil {
-					return result, err
+					return err
 				}
 			}
 			continue
@@ -41,37 +38,64 @@ func syncConnectors(ctx context.Context, runtimeRoot, sharedRoot string, configu
 		if connector.External {
 			continue
 		}
-		if err := ensureNetwork(ctx, connector.Network, connector.Managed && connector.Bundle != "", stdout, stderr); err != nil {
-			return result, err
+		if err := ensureExtensionControlNetwork(ctx, connector, stdout, stderr); err != nil {
+			return err
 		}
 		if err := connectContainer(ctx, workspaceContainer, connector.Network, stdout, stderr); err != nil {
-			return result, err
+			return err
 		}
-		if connector.Managed {
-			started, err := ensureManagedConnector(ctx, runtimeRoot, sharedRoot, connector, stdout, stderr)
-			if err != nil {
-				return result, err
-			}
-			if started {
-				result.started = append(result.started, connector)
-			}
-		} else if !dockerObjectExists(ctx, "container", connector.Container) {
-			return result, fmt.Errorf("external connector %s container is not present: %s", connector.ID, connector.Container)
+		if err := ensureManagedConnector(ctx, runtimeRoot, sharedRoot, connector, stdout, stderr); err != nil {
+			return err
 		}
 		if err := connectContainer(ctx, connector.Container, connector.Network, stdout, stderr); err != nil {
-			return result, err
+			return err
 		}
 		if connector.Managed && connector.Grants.Internet {
 			internetNetwork := extensionEgressNetwork(connector.ID)
 			if err := ensureExtensionEgressNetwork(ctx, connector.ID, stdout, stderr); err != nil {
-				return result, err
+				return err
 			}
 			if err := connectContainer(ctx, connector.Container, internetNetwork, stdout, stderr); err != nil {
-				return result, err
+				return err
 			}
 		}
 	}
-	return result, nil
+	return nil
+}
+
+// stopUnconfiguredManagedConnectors prevents a removed bundle or profile from
+// leaving an old sidecar consuming CPU after the next launch. It stops only
+// containers carrying Lisan's ownership label; cleanup remains responsible for
+// deleting their state and images.
+func stopUnconfiguredManagedConnectors(ctx context.Context, configured []appconfig.ConnectorConfig, stdout, stderr io.Writer) error {
+	known := make(map[string]bool, len(configured))
+	for _, connector := range configured {
+		known[connector.ID] = true
+	}
+	output, err := dockerOutput(ctx, "ps", "--filter", "label=io.lisanalgaib.connector", "--format", `{{.Names}}|{{.Label "io.lisanalgaib.connector"}}`)
+	if err != nil {
+		return fmt.Errorf("list running managed extensions: %w", err)
+	}
+	for _, name := range unconfiguredManagedConnectorNames(output, known) {
+		if err := runDocker(ctx, stdout, stderr, "stop", name); err != nil {
+			return fmt.Errorf("stop unconfigured managed extension %s: %w", name, err)
+		}
+		cliout.Detail(stdout, "stopped", "unconfigured extension "+name)
+	}
+	return nil
+}
+
+func unconfiguredManagedConnectorNames(output string, known map[string]bool) []string {
+	var names []string
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		name, id, ok := strings.Cut(line, "|")
+		name, id = strings.TrimSpace(name), strings.TrimSpace(id)
+		if !ok || !dockerName.MatchString(name) || !dockerName.MatchString(id) || known[id] {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names
 }
 
 func validateConnector(connector appconfig.ConnectorConfig) error {
@@ -81,13 +105,16 @@ func validateConnector(connector appconfig.ConnectorConfig) error {
 		}
 		return nil
 	}
+	if !connector.Managed {
+		return fmt.Errorf("extension %q must use a managed bundle or external HTTP endpoint", connector.ID)
+	}
 	if !dockerName.MatchString(connector.ID) || !dockerName.MatchString(connector.Container) || !dockerName.MatchString(connector.Network) {
 		return fmt.Errorf("connector %q has an invalid id, container, or network name", connector.ID)
 	}
-	if connector.Managed && strings.TrimSpace(connector.Image) == "" {
-		return fmt.Errorf("managed connector %q requires an image", connector.ID)
+	if err := appconfig.ValidateExtensionImageArgument(connector.Image); err != nil {
+		return fmt.Errorf("managed connector %q has an invalid image reference", connector.ID)
 	}
-	if connector.Managed && !validDockerUser(connector.User) {
+	if !validDockerUser(connector.User) {
 		return fmt.Errorf("managed connector %q requires a valid container user", connector.ID)
 	}
 	if connector.Grants.SharedWrite && !connector.Grants.SharedRead {
@@ -97,9 +124,16 @@ func validateConnector(connector appconfig.ConnectorConfig) error {
 		return fmt.Errorf("managed connector %q grants a capability the bundle did not request", connector.ID)
 	}
 	for _, value := range connector.Environment {
-		parts := strings.SplitN(value, "=", 2)
-		if len(parts) != 2 || !dockerEnvironmentName.MatchString(parts[0]) || strings.ContainsRune(value, '\x00') {
+		if err := appconfig.ValidateExtensionEnvironment(value); err != nil {
 			return fmt.Errorf("managed connector %q has invalid environment entry", connector.ID)
+		}
+	}
+	if connector.Network != appconfig.ExtensionControlNetworkName(connector.ID) {
+		return fmt.Errorf("managed connector %q must use its dedicated control network", connector.ID)
+	}
+	for _, tmpfs := range connector.Tmpfs {
+		if err := appconfig.ValidateExtensionTmpfs(tmpfs); err != nil {
+			return fmt.Errorf("managed connector %q: %w", connector.ID, err)
 		}
 	}
 	return nil
@@ -113,32 +147,42 @@ func grantsWithinRequests(granted, requested appconfig.ExtensionGrants) bool {
 }
 
 func validDockerUser(value string) bool {
-	parts := strings.Split(value, ":")
-	if len(parts) == 0 || len(parts) > 2 {
-		return false
-	}
-	for _, part := range parts {
-		if !dockerName.MatchString(part) {
-			return false
-		}
-	}
-	return true
+	return appconfig.ValidExtensionContainerUser(value)
 }
 
-func ensureManagedConnector(ctx context.Context, runtimeRoot, sharedRoot string, connector appconfig.ConnectorConfig, stdout, stderr io.Writer) (bool, error) {
-	if !dockerObjectExists(ctx, "image", connector.Image) {
+func ensureManagedConnector(ctx context.Context, runtimeRoot, sharedRoot string, connector appconfig.ConnectorConfig, stdout, stderr io.Writer) error {
+	imageExists := dockerObjectExists(ctx, "image", connector.Image)
+	buildSignature := ""
+	buildRequired := !imageExists
+	if connector.BuildContext != "" {
+		var err error
+		buildSignature, err = connectorBuildSignature(runtimeRoot, connector)
+		if err != nil {
+			return fmt.Errorf("connector %s build fingerprint: %w", connector.ID, err)
+		}
+		if imageExists {
+			current, _ := dockerOutput(ctx, "image", "inspect", "--format", `{{index .Config.Labels "io.lisanalgaib.connector-build-signature"}}`, connector.Image)
+			buildRequired = strings.TrimSpace(current) != buildSignature
+		}
+	}
+	if buildRequired {
 		if connector.BuildContext == "" {
-			return false, fmt.Errorf("connector %s image is missing and has no build context: %s", connector.ID, connector.Image)
+			return fmt.Errorf("connector %s image is missing and has no build context: %s", connector.ID, connector.Image)
 		}
 		contextPath, err := resolveRuntimePath(runtimeRoot, connector.BuildContext)
 		if err != nil {
-			return false, fmt.Errorf("connector %s build context: %w", connector.ID, err)
+			return fmt.Errorf("connector %s build context: %w", connector.ID, err)
 		}
-		arguments := []string{"build", "--label", "io.lisanalgaib.connector-image=" + connector.ID, "--tag", connector.Image}
+		arguments := []string{
+			"build",
+			"--label", "io.lisanalgaib.connector-image=" + connector.ID,
+			"--label", "io.lisanalgaib.connector-build-signature=" + buildSignature,
+			"--tag", connector.Image,
+		}
 		if connector.Dockerfile != "" {
 			dockerfile, err := resolveRuntimePath(runtimeRoot, connector.Dockerfile)
 			if err != nil {
-				return false, fmt.Errorf("connector %s Dockerfile: %w", connector.ID, err)
+				return fmt.Errorf("connector %s Dockerfile: %w", connector.ID, err)
 			}
 			arguments = append(arguments, "--file", dockerfile)
 		}
@@ -146,56 +190,79 @@ func ensureManagedConnector(ctx context.Context, runtimeRoot, sharedRoot string,
 		structured := append([]string{"build", "--progress=rawjson"}, arguments[1:]...)
 		if err := runDockerProgress(stderr, "Building extension "+connector.Name,
 			exec.CommandContext(ctx, "docker", structured...), exec.CommandContext(ctx, "docker", arguments...)); err != nil {
-			return false, fmt.Errorf("build connector %s: %w", connector.ID, err)
+			return fmt.Errorf("build connector %s: %w", connector.ID, err)
 		}
+	}
+	desiredImageID, err := dockerOutput(ctx, "image", "inspect", "--format", `{{.Id}}`, connector.Image)
+	if err != nil {
+		return fmt.Errorf("inspect connector %s image after build: %w", connector.ID, err)
+	}
+	if strings.TrimSpace(desiredImageID) == "" {
+		return fmt.Errorf("inspect connector %s image after build: Docker returned an empty image ID", connector.ID)
 	}
 	if dockerObjectExists(ctx, "container", connector.Container) {
 		label, _ := dockerOutput(ctx, "inspect", "--format", `{{index .Config.Labels "io.lisanalgaib.connector"}}`, connector.Container)
 		if strings.TrimSpace(label) != connector.ID {
-			return false, fmt.Errorf("refusing to manage existing unowned container %s", connector.Container)
+			return fmt.Errorf("refusing to manage existing unowned container %s", connector.Container)
 		}
 		running, _ := dockerOutput(ctx, "inspect", "--format", `{{.State.Running}}`, connector.Container)
-		containerImage, _ := dockerOutput(ctx, "inspect", "--format", `{{.Config.Image}}`, connector.Container)
+		containerImageID, _ := dockerOutput(ctx, "inspect", "--format", `{{.Image}}`, connector.Container)
 		containerConfig, _ := dockerOutput(ctx, "inspect", "--format", `{{index .Config.Labels "io.lisanalgaib.connector-config"}}`, connector.Container)
-		if strings.TrimSpace(containerImage) != connector.Image || strings.TrimSpace(containerConfig) != connectorRuntimeSignature(connector) {
+		if strings.TrimSpace(containerImageID) != strings.TrimSpace(desiredImageID) || strings.TrimSpace(containerConfig) != connectorRuntimeSignature(connector) {
 			if strings.TrimSpace(running) == "true" {
 				if err := runDocker(ctx, stdout, stderr, "stop", connector.Container); err != nil {
-					return false, fmt.Errorf("stop outdated connector %s: %w", connector.ID, err)
+					return fmt.Errorf("stop outdated connector %s: %w", connector.ID, err)
 				}
 			}
 			if err := runDocker(ctx, stdout, stderr, "rm", connector.Container); err != nil {
-				return false, fmt.Errorf("replace outdated connector %s: %w", connector.ID, err)
+				return fmt.Errorf("replace outdated connector %s: %w", connector.ID, err)
 			}
 		} else if strings.TrimSpace(running) != "true" {
 			if err := runDocker(ctx, stdout, stderr, "start", connector.Container); err != nil {
-				return false, fmt.Errorf("start connector %s: %w", connector.ID, err)
+				return fmt.Errorf("start connector %s: %w", connector.ID, err)
 			}
 			cliout.Success(stdout, "Starting extension "+connector.Name)
-			return true, nil
+			return nil
 		} else {
-			return false, nil
+			return nil
 		}
 	}
 	if connector.Grants.PersistentState {
 		if err := ensureExtensionVolume(ctx, connector, stdout, stderr); err != nil {
-			return false, err
+			return err
 		}
 	}
 	arguments := connectorRunArguments(connector, sharedRoot)
 	if err := runDocker(ctx, stdout, stderr, arguments...); err != nil {
-		return false, fmt.Errorf("run connector %s: %w", connector.ID, err)
+		return fmt.Errorf("run connector %s: %w", connector.ID, err)
 	}
 	cliout.Success(stdout, "Starting extension "+connector.Name)
-	return true, nil
+	return nil
+}
+
+func connectorBuildSignature(runtimeRoot string, connector appconfig.ConnectorConfig) (string, error) {
+	hash := sha256.New()
+	fmt.Fprintf(hash, "%s\n%s\n%s\n%s\n", connector.ID, connector.Image, connector.BuildContext, connector.Dockerfile)
+	paths := []string{".dockerignore", "go.mod", "go.sum", "internal"}
+	if connector.Bundle != "" {
+		paths = append(paths, connector.Bundle)
+	}
+	if connector.Dockerfile != "" {
+		paths = append(paths, connector.Dockerfile)
+	}
+	if err := writeRuntimeFingerprint(hash, runtimeRoot, paths); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
 }
 
 func connectorRunArguments(connector appconfig.ConnectorConfig, sharedRoot string) []string {
 	arguments := []string{
 		"run", "--detach", "--name", connector.Container,
-		"--hostname", connector.ID, "--network", connector.Network,
+		"--network", connector.Network,
 		"--user", connector.User,
-		"--restart", "unless-stopped", "--read-only", "--cap-drop", "ALL",
-		"--security-opt", "no-new-privileges", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+		"--restart", "no", "--read-only", "--cap-drop", "ALL",
+		"--security-opt", "no-new-privileges", "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m",
 	}
 	for _, tmpfs := range connector.Tmpfs {
 		arguments = append(arguments, "--tmpfs", tmpfs)
@@ -266,26 +333,27 @@ func stopManagedConnector(ctx context.Context, connector appconfig.ConnectorConf
 	return nil
 }
 
-func ensureNetwork(ctx context.Context, network string, internal bool, stdout, stderr io.Writer) error {
-	if dockerObjectExists(ctx, "network", network) {
-		if internal {
-			if !dockerNetworkOwned(ctx, network) {
-				return fmt.Errorf("refusing to use unowned extension control network %s", network)
-			}
-			value, err := dockerOutput(ctx, "network", "inspect", "--format", `{{.Internal}}`, network)
-			if err != nil || strings.TrimSpace(value) != "true" {
-				return fmt.Errorf("extension control network %s is not internal", network)
-			}
+func ensureExtensionControlNetwork(ctx context.Context, connector appconfig.ConnectorConfig, stdout, stderr io.Writer) error {
+	name := appconfig.ExtensionControlNetworkName(connector.ID)
+	if connector.Network != name {
+		return fmt.Errorf("extension %s control network must be %s", connector.ID, name)
+	}
+	if dockerObjectExists(ctx, "network", name) {
+		if !dockerExtensionControlOwned(ctx, name) {
+			return fmt.Errorf("refusing to use unowned extension control network %s", name)
+		}
+		value, err := dockerOutput(ctx, "network", "inspect", "--format", `{{.Internal}}`, name)
+		if err != nil || strings.TrimSpace(value) != "true" {
+			return fmt.Errorf("extension control network %s is not internal", name)
 		}
 		return nil
 	}
-	arguments := []string{"network", "create", "--label", "io.lisanalgaib.network=1"}
-	if internal {
-		arguments = append(arguments, "--internal")
-	}
-	arguments = append(arguments, network)
-	if err := runDocker(ctx, stdout, stderr, arguments...); err != nil {
-		return fmt.Errorf("create connector network %s: %w", network, err)
+	if err := runDocker(ctx, stdout, stderr, "network", "create", "--internal",
+		"--label", "io.lisanalgaib.network=1",
+		"--label", "io.lisanalgaib.extension-control="+connector.ID,
+		name,
+	); err != nil {
+		return fmt.Errorf("create extension %s control network: %w", connector.ID, err)
 	}
 	return nil
 }
@@ -300,6 +368,10 @@ func ensureExtensionEgressNetwork(ctx context.Context, id string, stdout, stderr
 		label, _ := dockerOutput(ctx, "network", "inspect", "--format", `{{index .Labels "io.lisanalgaib.extension-egress"}}`, name)
 		if strings.TrimSpace(label) != id {
 			return fmt.Errorf("refusing to use unowned extension egress network %s", name)
+		}
+		internal, err := dockerOutput(ctx, "network", "inspect", "--format", `{{.Internal}}`, name)
+		if err != nil || strings.TrimSpace(internal) != "false" {
+			return fmt.Errorf("extension egress network %s cannot provide outbound access", name)
 		}
 		return nil
 	}

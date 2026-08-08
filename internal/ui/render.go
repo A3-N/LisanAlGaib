@@ -518,15 +518,6 @@ func (m *Model) terminalLines() []string {
 	)
 }
 
-func (m *Model) connectorLines() []string {
-	document := m.connectorDocument()
-	lines := make([]string, 0, len(document))
-	for _, line := range document {
-		lines = append(lines, line.Text)
-	}
-	return lines
-}
-
 func (m *Model) connectorDocument() []extensionLine {
 	id := m.selectedConnector
 	state, ok := m.connectorState(id)

@@ -17,9 +17,13 @@ import (
 	"strings"
 
 	"lisanalgaib/internal/appconfig"
+	"lisanalgaib/internal/safefile"
 )
 
-const SchemaVersion = 1
+const (
+	SchemaVersion      = 1
+	maxBundleFileBytes = 256 << 10
+)
 
 var identifier = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 
@@ -114,7 +118,7 @@ func Discover(root string) ([]Bundle, error) {
 			continue
 		}
 		bundlePath := filepath.Join(extensionsRoot, entry.Name(), "bundle.json")
-		data, readErr := os.ReadFile(bundlePath)
+		data, readErr := safefile.Read(bundlePath, maxBundleFileBytes)
 		if errors.Is(readErr, os.ErrNotExist) {
 			continue
 		}
@@ -139,6 +143,9 @@ func Discover(root string) ([]Bundle, error) {
 		}
 		seen[bundle.ID] = true
 		bundles = append(bundles, bundle)
+		if len(bundles) > appconfig.MaxConnectors {
+			return nil, fmt.Errorf("extension runtime exceeds the %d bundle limit", appconfig.MaxConnectors)
+		}
 	}
 	sort.Slice(bundles, func(i, j int) bool { return bundles[i].Name < bundles[j].Name })
 	return bundles, nil
@@ -159,7 +166,13 @@ func Validate(root string, bundle Bundle) error {
 		return nil
 	}
 	if bundle.Docker.Image == "" || bundle.Docker.Context == "" || bundle.Docker.Dockerfile == "" || bundle.Docker.User == "" || bundle.Docker.Port < 1 || bundle.Docker.Port > 65535 {
-		return errors.New("Docker image, context, Dockerfile, user, and port are required")
+		return errors.New("docker image, context, Dockerfile, user, and port are required")
+	}
+	if !appconfig.ValidExtensionContainerUser(bundle.Docker.User) {
+		return errors.New("docker user must be an explicit non-root numeric uid or uid:gid")
+	}
+	if err := appconfig.ValidateExtensionImageArgument(bundle.Docker.Image); err != nil {
+		return err
 	}
 	if bundle.Native.Executable == "" {
 		return errors.New("native executable is required")
@@ -174,14 +187,19 @@ func Validate(root string, bundle Bundle) error {
 			return err
 		}
 	}
-	for _, value := range append(append([]string(nil), bundle.Docker.Environment...), bundle.Native.Arguments...) {
+	for _, value := range bundle.Native.Arguments {
 		if strings.ContainsRune(value, '\x00') {
-			return errors.New("runtime arguments and environment cannot contain NUL")
+			return errors.New("runtime arguments cannot contain NUL")
 		}
 	}
 	for _, value := range bundle.Docker.Environment {
-		if strings.HasPrefix(value, "LISAN_EXTENSION_") {
-			return errors.New("bundle environment cannot override reserved LISAN_EXTENSION_ values")
+		if err := appconfig.ValidateExtensionEnvironment(value); err != nil {
+			return err
+		}
+	}
+	for _, value := range bundle.Docker.Tmpfs {
+		if err := appconfig.ValidateExtensionTmpfs(value); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -244,7 +262,7 @@ func (bundle Bundle) ConnectorConfig() appconfig.ConnectorConfig {
 		Managed: true, Bundle: bundle.Directory, Version: bundle.Version,
 		Image: bundle.Docker.Image, BuildContext: bundle.Docker.Context,
 		Dockerfile: bundle.Docker.Dockerfile, Container: container,
-		User: bundle.Docker.User, Network: "arrakis-extension-control",
+		User: bundle.Docker.User, Network: appconfig.ExtensionControlNetworkName(bundle.ID),
 		Endpoint:         fmt.Sprintf("http://%s:%d", container, bundle.Docker.Port),
 		Tmpfs:            append([]string(nil), bundle.Docker.Tmpfs...),
 		Environment:      append([]string(nil), bundle.Docker.Environment...),

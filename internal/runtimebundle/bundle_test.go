@@ -40,6 +40,27 @@ func TestArchivePathValidation(t *testing.T) {
 	}
 }
 
+func TestArchiveExtractionLimits(t *testing.T) {
+	var compressed bytes.Buffer
+	gz := gzip.NewWriter(&compressed)
+	tw := tar.NewWriter(gz)
+	if err := tw.WriteHeader(&tar.Header{Name: "large", Typeflag: tar.TypeReg, Mode: 0o644, Size: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte("ab")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := extractReaderWithLimits(bytes.NewReader(compressed.Bytes()), t.TempDir(), 1, 1); err == nil {
+		t.Fatal("oversized archive entry was accepted")
+	}
+}
+
 func TestRuntimeSourceFilterExcludesBuildOnlyFiles(t *testing.T) {
 	for _, path := range []string{
 		"cmd/lisan-runtime-pack",

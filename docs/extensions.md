@@ -39,7 +39,7 @@ a valid directory is sufficient; no core registry needs editing.
     "container": "lisan-example",
     "user": "10001:10001",
     "port": 7777,
-    "tmpfs": ["/run:rw,noexec,nosuid,size=8m"],
+    "tmpfs": ["/run:rw,noexec,nosuid,nodev,size=8m"],
     "environment": ["EXAMPLE_MODE=field"]
   },
   "native": {
@@ -103,13 +103,30 @@ Optional grants add exactly these resources:
 The control protocol never needs a published host port, workspace mount,
 Docker socket, device, secret, or host home directory.
 
+The workspace joins an enabled extension's private control network because the
+core client must reach its API. That network isolates the sidecar from other
+extensions; it does not make the extension API inaccessible to hostile code in
+the workspace. Treat every endpoint as untrusted input and expose only narrow,
+validated actions.
+
+The `internet` grant controls the running sidecar. It does not constrain
+Docker's image-build network. A user who enables a locally added bundle trusts
+its Dockerfile and the files in its build context. Keep extension-owned build
+inputs inside the bundle directory. Lisan fingerprints that whole directory,
+the Dockerfile, and shared module/core inputs so relevant source changes
+rebuild the image while unchanged Docker layers remain cacheable.
+
 `vm` launches the platform-native executable on an ephemeral loopback port and
 stops it with Lisan. It passes granted state/shared paths, but Wormsign is an
 unsandboxed host-user mode: those path hints are organization, not a security
 boundary. Use Docker for hostile extension code.
 
+Switching tabs leaves the extension process, jobs, and current session alive.
+The core keeps at most one open interactive session for each extension and
+closes replaced sessions. Closing the final Docker cockpit stops managed
+sidecars; Docker state and granted volumes remain for the next launch.
 `lisan cleanup` removes managed extension containers, images, state volumes,
-and the private control network. It preserves the host shared directory.
+and private control/egress networks. It preserves the host shared directory.
 
 ## Implement the service
 

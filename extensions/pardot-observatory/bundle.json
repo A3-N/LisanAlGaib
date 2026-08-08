@@ -13,7 +13,7 @@
     "user": "65532:65532",
     "port": 7777,
     "tmpfs": [
-      "/run:rw,noexec,nosuid,size=8m"
+      "/run:rw,noexec,nosuid,nodev,size=8m"
     ],
     "environment": [
       "PARDOT_REGION=Arrakeen Basin"

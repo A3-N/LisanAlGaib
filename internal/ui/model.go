@@ -279,6 +279,7 @@ type Model struct {
 	connectorRunning        map[string]bool
 	connectorInputs         map[string]map[string]map[string]string
 	connectorSessions       map[string]connectorapi.Session
+	connectorSessionPending map[string]bool
 	extensionInputEdit      string
 	extensionInputText      string
 	extensionControlCursor  int
@@ -329,17 +330,18 @@ func NewModelWithProfile(root string, profile appconfig.Profile) *Model {
 			"workspace": true,
 			"user":      true,
 		},
-		loading:           true,
-		status:            "Scanning configured inventory and extensions…",
-		sessions:          make(map[string]*terminalhost.Session),
-		starting:          make(map[string]bool),
-		connectorJobs:     make(map[string]connectorapi.Job),
-		connectorRunning:  make(map[string]bool),
-		connectorInputs:   make(map[string]map[string]map[string]string),
-		connectorSessions: make(map[string]connectorapi.Session),
-		sectionViews:      make(map[section]sectionViewState),
-		extensionViews:    make(map[string]extensionViewState),
-		selectedConnector: firstEnabledConnector(profile),
+		loading:                 true,
+		status:                  "Scanning configured inventory and extensions…",
+		sessions:                make(map[string]*terminalhost.Session),
+		starting:                make(map[string]bool),
+		connectorJobs:           make(map[string]connectorapi.Job),
+		connectorRunning:        make(map[string]bool),
+		connectorInputs:         make(map[string]map[string]map[string]string),
+		connectorSessions:       make(map[string]connectorapi.Session),
+		connectorSessionPending: make(map[string]bool),
+		sectionViews:            make(map[section]sectionViewState),
+		extensionViews:          make(map[string]extensionViewState),
+		selectedConnector:       firstEnabledConnector(profile),
 	}
 }
 
@@ -507,6 +509,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, pollConnectorJobCmd(m.ctx, msg.ConnectorID, m.connectorEndpoint(msg.ConnectorID), msg.Job.ID)
 	case connectorSessionMsg:
+		delete(m.connectorSessionPending, msg.ConnectorID)
 		if msg.Err != nil {
 			m.status = "Extension session failed: " + msg.Err.Error()
 			return m, nil
@@ -976,6 +979,8 @@ func (m *Model) selectExtension(id string) tea.Cmd {
 			} else {
 				m.rememberExtensionView()
 			}
+			m.extensionSessionCapture = false
+			m.extensionSessionInput = ""
 			m.selectedConnector = id
 			m.page = pageConnector
 			m.capture = false
@@ -1157,6 +1162,10 @@ func (m *Model) activateRow(rows []sidebarRow, index int) tea.Cmd {
 		return nil
 	}
 	row := rows[index]
+	if row.Kind == rowConnectorView || row.Kind == rowConnectorAction || row.Kind == rowConnectorSession || row.Kind == rowConnectorArtifact {
+		m.extensionSessionCapture = false
+		m.extensionSessionInput = ""
+	}
 	switch row.Kind {
 	case rowCategory:
 		m.expanded[row.ID] = !m.expanded[row.ID]

@@ -22,7 +22,7 @@ func TestBundledExtensionIsDiscoveredWithoutCoreRegistration(t *testing.T) {
 		t.Fatalf("unexpected discovered bundles: %#v", bundles)
 	}
 	connector := bundles[0].ConnectorConfig()
-	if connector.Enabled || connector.NativeExecutable == "" || connector.Network != "arrakis-extension-control" {
+	if connector.Enabled || connector.NativeExecutable == "" || connector.Network != appconfig.ExtensionControlNetworkName(connector.ID) {
 		t.Fatalf("discovered extension lifecycle is incomplete or enabled: %#v", connector)
 	}
 }
@@ -37,12 +37,27 @@ func TestReconcilePreservesLifecycleChoiceAndGrants(t *testing.T) {
 	document := appconfig.DefaultDocument(time.Now())
 	document.Profiles[0].Connectors = []appconfig.ConnectorConfig{
 		{ID: "extension", Bundle: "extensions/extension", Enabled: true, Grants: appconfig.ExtensionGrants{PersistentState: true}},
-		{ID: "external", Name: "External", Enabled: true, Container: "external", Network: "external", Endpoint: "http://external:7777"},
+		{ID: "external", Name: "External", Enabled: true, External: true, Container: "external", Network: "external", Endpoint: "http://external:7777"},
 	}
 	Reconcile(&document, []Bundle{bundle})
 	connectors := document.Profiles[0].Connectors
 	if len(connectors) != 2 || connectors[0].ID != "external" || connectors[1].ID != "extension" || !connectors[1].Enabled || !connectors[1].Grants.PersistentState {
 		t.Fatalf("reconcile lost external state or extension choices: %#v", connectors)
+	}
+}
+
+func TestDiscoverRejectsOversizedBundle(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "extensions", "oversized")
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := make([]byte, maxBundleFileBytes+1)
+	if err := os.WriteFile(filepath.Join(directory, "bundle.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Discover(root); err == nil {
+		t.Fatal("oversized extension bundle was accepted")
 	}
 }
 

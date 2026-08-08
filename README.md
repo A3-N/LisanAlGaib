@@ -62,9 +62,9 @@ Your terminal
 ```
 
 The Usul Docker volume preserves the container home between launches. The only
-default host bind mount is `shared/`, making file exchange deliberate and easy
-to audit. Anything placed in that folder can be changed or deleted by code in
-the container.
+host bind mount is `shared/`, making file exchange deliberate and easy to
+audit. Anything placed there can be read, changed, or deleted by code in the
+container.
 
 ```bash
 lisan cleanup
@@ -74,9 +74,12 @@ Cleanup removes Lisan-owned containers, images, networks, and the persistent
 Usul volume. It preserves the host `shared/` directory.
 
 Docker is the recommended boundary for untrusted repositories, plugins,
-installers, and agent-generated commands. It is containment, not magic: keep
-secrets and sensitive files outside `shared/`. See [SECURITY.md](SECURITY.md)
-for the exact threat model.
+installers, and agent-generated commands. A malicious package can own the
+workspace, its credentials, the Usul volume, and `shared/`; it should not gain a
+normal filesystem path to the rest of the host. Docker escape vulnerabilities,
+network access, and resource exhaustion remain outside that promise. Keep
+secrets and sensitive files outside the sandbox and read the exact threat model
+in [SECURITY.md](SECURITY.md).
 
 ## Commands
 
@@ -104,9 +107,27 @@ directly as your host user. Use it only when you intentionally want host access.
 The TUI stays inside the terminal that launched it. Lisan does not choose your
 terminal or host shell. A Nerd Font is recommended for interface icons.
 
+## Sessions and resources
+
+Changing tabs does not restart shells, agents, the editor, or extension
+sessions. Shells and agents may keep working in the background; on Unix the
+hidden editor is paused to avoid idle redraw work. Closing the last Docker
+cockpit stops Lisan's containers, while their container state and named volumes
+remain ready for the next launch. Background processes do not survive that
+stop. `cleanup` is the destructive reset.
+
+Lisan deliberately does not hardcode CPU or memory limits. That avoids quietly
+starving a heavy build and lets the same release fit laptops and workstations.
+Set the Docker VM's CPU, memory, swap, disk, and idle behavior in
+[Docker Desktop settings](https://docs.docker.com/desktop/settings-and-maintenance/settings/);
+[Resource Saver](https://docs.docker.com/desktop/use-desktop/resource-saver/)
+can reduce idle Desktop usage. On Linux, tune the Docker host itself. Enable
+only the tools and extensions you use; profile-dependent installs remain in the
+last Docker layers so changing them reuses the expensive base layers.
+
 ## Development and releases
 
-Source development requires Go 1.26:
+Source development requires Go 1.26.5 or newer:
 
 ```bash
 ./scripts/go test ./...
