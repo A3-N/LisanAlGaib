@@ -287,6 +287,38 @@ func TestManagedExtensionIsolationValuesAreStrict(t *testing.T) {
 	}
 }
 
+func TestLegacyExtensionTmpfsIsHardenedDuringLoad(t *testing.T) {
+	document := DefaultDocument(time.Now())
+	connector := testManagedExtension()
+	connector.Tmpfs = []string{"/run:rw,noexec,nosuid,size=8m"}
+	document.Profiles[0].Connectors = []ConnectorConfig{connector}
+	data, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("legacy tmpfs blocked config load: %v", err)
+	}
+	active, ok := loaded.Active()
+	if !ok || len(active.Connectors) != 1 || len(active.Connectors[0].Tmpfs) != 1 {
+		t.Fatalf("loaded connector is incomplete: %#v", active.Connectors)
+	}
+	if migrated := active.Connectors[0].Tmpfs[0]; migrated != "/run:rw,noexec,nosuid,size=8m,nodev" {
+		t.Fatalf("legacy tmpfs was not hardened: %q", migrated)
+	}
+	if err := ValidateExtensionTmpfs(active.Connectors[0].Tmpfs[0]); err != nil {
+		t.Fatalf("migrated tmpfs is invalid: %v", err)
+	}
+	if migrated := migrateExtensionTmpfs("/run:rw,size=8m"); migrated != "/run:rw,size=8m" {
+		t.Fatalf("unsafe tmpfs was silently broadened: %q", migrated)
+	}
+}
+
 func TestConfigRejectsUnknownFieldsAndDuplicateIdentities(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	document := DefaultDocument(time.Now())

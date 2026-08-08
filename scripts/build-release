@@ -4,6 +4,10 @@ set -eu
 project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 archive="$project_root/internal/runtimebundle/assets/runtime.tar.gz"
 dist="$project_root/dist"
+# Release artifacts use the patched compiler explicitly. Keeping this out of
+# go.mod prevents `go run ... docker` from downloading a patch toolchain onto
+# an otherwise compatible host merely to start the Docker sandbox.
+export GOTOOLCHAIN="${LISAN_RELEASE_GO_TOOLCHAIN:-go1.26.5}"
 active_goos=
 active_goarch=
 active_output=

@@ -102,7 +102,7 @@ func run(arguments []string) (resultErr error) {
 		return err
 	}
 	if options.command == commandDocker {
-		if err := deps.EnsureDocker(ctx, os.Stderr); err != nil {
+		if err := deps.CheckDocker(); err != nil {
 			return err
 		}
 		return launcher.RunDocker(ctx, launcher.DockerOptions{
@@ -116,7 +116,8 @@ func run(arguments []string) (resultErr error) {
 	}
 	wormsign := options.command == commandVM
 	if wormsign {
-		// The vm command currently enters Wormsign and executes as the host user.
+		// The vm command enters Wormsign and is the only launch mode authorized
+		// to install missing host dependencies.
 		if err := os.Setenv("LISAN_WORMSIGN", "1"); err != nil {
 			return err
 		}

@@ -746,6 +746,9 @@ func normalizeConnector(connector *ConnectorConfig) {
 	connector.User = strings.TrimSpace(connector.User)
 	connector.Network = strings.TrimSpace(connector.Network)
 	connector.Endpoint = strings.TrimSpace(connector.Endpoint)
+	for index, value := range connector.Tmpfs {
+		connector.Tmpfs[index] = migrateExtensionTmpfs(value)
+	}
 	if connector.Network == "lisan-al-gaib" || connector.Network == "lisan-sietch-net" {
 		connector.Network = "arrakis-shield-wall"
 	}
@@ -770,6 +773,27 @@ func normalizeConnector(connector *ConnectorConfig) {
 	if connector.Grants.SharedWrite {
 		connector.Grants.SharedRead = true
 	}
+}
+
+// migrateExtensionTmpfs upgrades values accepted before nodev became a
+// mandatory sidecar mount option. Only an otherwise-valid legacy value is
+// changed; malformed or custom unsafe values still fail normal validation.
+func migrateExtensionTmpfs(value string) string {
+	value = strings.TrimSpace(value)
+	parts := strings.SplitN(value, ":", 2)
+	if len(parts) != 2 {
+		return value
+	}
+	for _, option := range strings.Split(parts[1], ",") {
+		if option == "nodev" {
+			return value
+		}
+	}
+	candidate := value + ",nodev"
+	if ValidateExtensionTmpfs(candidate) == nil {
+		return candidate
+	}
+	return value
 }
 
 func validateDocument(document Document) error {

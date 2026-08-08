@@ -134,10 +134,14 @@ func TestUnixNPMInstallUsesWritableUserPrefix(t *testing.T) {
 	}
 }
 
-func TestHostDockerRuntimeAlsoRequiresComposePlugin(t *testing.T) {
-	requirements := dockerRequirements()
-	if len(requirements) != 2 || requirements[1].ID != "docker-compose" {
-		t.Fatalf("Docker requirements omit the Compose plugin: %#v", requirements)
+func TestDockerCheckNeverInstallsHostDependencies(t *testing.T) {
+	t.Setenv("PATH", "")
+	err := CheckDocker()
+	if err == nil || !strings.Contains(err.Error(), "docker, docker-compose") {
+		t.Fatalf("Docker check did not report every host prerequisite: %v", err)
+	}
+	if os.Getenv("PATH") != "" {
+		t.Fatalf("Docker check mutated the host PATH: %q", os.Getenv("PATH"))
 	}
 }
 

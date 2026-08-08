@@ -46,6 +46,26 @@ func TestReconcilePreservesLifecycleChoiceAndGrants(t *testing.T) {
 	}
 }
 
+func TestEveryPresetIncludesNewBundlesDisabled(t *testing.T) {
+	bundle := Bundle{
+		SchemaVersion: SchemaVersion, ID: "extension", Name: "Extension", Version: "3.0.0", Directory: "extensions/extension",
+		Docker: DockerRuntime{Image: "extension:3", Context: ".", Dockerfile: "extensions/extension/Dockerfile", User: "10001:10001", Port: 7777},
+		Native: NativeRuntime{Executable: "extensions/extension/bin/extension_${os}_${arch}"},
+	}
+	document := appconfig.Document{SchemaVersion: appconfig.SchemaVersion}
+	for _, preset := range appconfig.Presets {
+		profile := appconfig.ProfileFromPreset(preset, time.Now())
+		profile.ID = preset.ID
+		document.Profiles = append(document.Profiles, profile)
+	}
+	Reconcile(&document, []Bundle{bundle})
+	for _, profile := range document.Profiles {
+		if len(profile.Connectors) != 1 || profile.Connectors[0].ID != bundle.ID || profile.Connectors[0].Enabled {
+			t.Fatalf("preset %q did not include the extension disabled: %#v", profile.Preset, profile.Connectors)
+		}
+	}
+}
+
 func TestDiscoverRejectsOversizedBundle(t *testing.T) {
 	root := t.TempDir()
 	directory := filepath.Join(root, "extensions", "oversized")

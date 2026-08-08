@@ -3,6 +3,7 @@ package launcher
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -283,7 +284,9 @@ func TestDockerfilesPinPatchedMultiArchitectureBaseImages(t *testing.T) {
 }
 
 func TestConnectorDockerfileCopiesOnlyItsDependencyPackages(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "extensions", "pardot-observatory", "Dockerfile"))
+	root := filepath.Join("..", "..")
+	dockerfilePath := filepath.Join(root, "extensions", "pardot-observatory", "Dockerfile")
+	data, err := os.ReadFile(dockerfilePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,9 +294,32 @@ func TestConnectorDockerfileCopiesOnlyItsDependencyPackages(t *testing.T) {
 	if strings.Contains(dockerfile, "COPY internal ./internal") {
 		t.Fatal("connector build copies every application package")
 	}
-	for _, dependency := range []string{"appconfig", "connectors", "extensionhost", "safefile", "textsafe"} {
+	command := exec.Command("go", "list", "-deps", "-f", "{{.ImportPath}}", "./extensions/pardot-observatory/cmd/pardot-observatory")
+	command.Dir = root
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("resolve extension dependency closure: %v: %s", err, output)
+	}
+	required := map[string]bool{}
+	for _, importPath := range strings.Fields(string(output)) {
+		const prefix = "lisanalgaib/internal/"
+		if strings.HasPrefix(importPath, prefix) {
+			required[strings.SplitN(strings.TrimPrefix(importPath, prefix), "/", 2)[0]] = true
+		}
+	}
+	for dependency := range required {
 		if !strings.Contains(dockerfile, "COPY internal/"+dependency+" ./internal/"+dependency) {
 			t.Fatalf("connector build omits dependency package %s", dependency)
+		}
+	}
+	for _, line := range strings.Split(dockerfile, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] != "COPY" || !strings.HasPrefix(fields[1], "internal/") {
+			continue
+		}
+		dependency := strings.SplitN(strings.TrimPrefix(fields[1], "internal/"), "/", 2)[0]
+		if !required[dependency] {
+			t.Fatalf("connector build copies unused internal package %s", dependency)
 		}
 	}
 	if !strings.Contains(dockerfile, `ENTRYPOINT ["/pardot-observatory"`) {

@@ -184,7 +184,7 @@ func TestSavedProfileEnterLoadsAndCtrlSSaves(t *testing.T) {
 	}
 }
 
-func TestPresetPreservesThirdPartyExtensionDefinitions(t *testing.T) {
+func TestPresetIncludesThirdPartyExtensionsDisabled(t *testing.T) {
 	model := New(appconfig.DefaultDocument(time.Now()), filepath.Join(t.TempDir(), "config.json"))
 	model.working.Connectors = append(model.working.Connectors, appconfig.ConnectorConfig{
 		ID: "custom", Name: "Custom", Enabled: true, External: true,
@@ -194,12 +194,12 @@ func TestPresetPreservesThirdPartyExtensionDefinitions(t *testing.T) {
 	if len(model.working.Connectors) != 1 || model.working.Connectors[0].ID != "custom" {
 		t.Fatalf("preset discarded custom extension: %#v", model.working.Connectors)
 	}
-	if !model.working.Connectors[0].Enabled {
-		t.Fatal("preset unexpectedly changed extension lifecycle state")
+	if model.working.Connectors[0].Enabled {
+		t.Fatal("preset implicitly enabled an extension")
 	}
 	model.applyPreset(0)
-	if len(model.working.Connectors) != 1 || !model.working.Connectors[0].Enabled {
-		t.Fatalf("preset discarded or changed custom extension: %#v", model.working.Connectors)
+	if len(model.working.Connectors) != 1 || model.working.Connectors[0].Enabled {
+		t.Fatalf("preset discarded or enabled custom extension: %#v", model.working.Connectors)
 	}
 }
 

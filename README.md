@@ -24,6 +24,9 @@ clone.
 
 Docker mode runs the same Linux workspace on every host architecture. Lisan
 selects compatible native agent downloads while building the image.
+It only checks for Docker plus the Compose plugin and never installs host
+software. Missing host prerequisites produce an error. Only `vm` may install
+selected host dependencies.
 
 ## Quick start
 
@@ -127,7 +130,7 @@ last Docker layers so changing them reuses the expensive base layers.
 
 ## Development and releases
 
-Source development requires Go 1.26.5 or newer:
+Source development requires Go 1.26 or newer:
 
 ```bash
 ./scripts/go test ./...

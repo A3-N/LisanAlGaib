@@ -290,9 +290,12 @@ func (m *Model) activate(index int) tea.Cmd {
 func (m *Model) applyPreset(index int) {
 	preset := appconfig.Presets[index]
 	configuredConnectors := m.working.Clone().Connectors
+	for connectorIndex := range configuredConnectors {
+		configuredConnectors[connectorIndex].Enabled = false
+	}
 	m.working = appconfig.ProfileFromPreset(preset, time.Now())
-	// Extension lifecycle and permissions are deliberately independent from
-	// core presets. Loading a preset never enables a sidecar or broadens it.
+	// Presets include every discovered extension definition but always start
+	// with its lifecycle disabled. Enabling a sidecar remains an explicit step.
 	m.working.Connectors = append(m.working.Connectors, configuredConnectors...)
 	m.source = "preset:" + preset.ID
 	m.status = preset.Name + " loaded; press Ctrl-S to save and activate"

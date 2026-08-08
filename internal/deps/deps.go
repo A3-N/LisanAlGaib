@@ -176,14 +176,20 @@ func installPlan(goos string, missing []requirement) ([]installCommand, error) {
 	return commands, nil
 }
 
+// Ensure may install selected host dependencies and is therefore reserved for
+// the explicitly unsandboxed vm command.
 func Ensure(ctx context.Context, profile appconfig.Profile, output io.Writer) error {
 	return ensure(ctx, required(profile), output)
 }
 
-// EnsureDocker installs only the host-side Docker runtime required to enter
-// Sietch Tabr. Docker is a launch prerequisite, not a workspace tool option.
-func EnsureDocker(ctx context.Context, output io.Writer) error {
-	return ensure(ctx, dockerRequirements(), output)
+// CheckDocker is deliberately read-only. Docker mode never runs a host package
+// manager or installer; users remain in control of their host configuration.
+func CheckDocker() error {
+	missingRequirements := missing(dockerRequirements())
+	if len(missingRequirements) > 0 {
+		return fmt.Errorf("docker mode requires host prerequisites: %s; install Docker Desktop/Engine with the Compose plugin and retry", missingNames(missingRequirements))
+	}
+	return nil
 }
 
 func dockerRequirements() []requirement {
@@ -278,7 +284,6 @@ func packageNames(goos, id string) []string {
 		"jq": {"jq"}, "wget": {"wget"}, "zip": {"zip"}, "fzf": {"fzf"}, "bat": {"bat"}, "tree": {"tree"}, "shellcheck": {"shellcheck"},
 		"ip": {"iproute2"}, "ping": {"iputils-ping"}, "dns": {"dnsutils"}, "net-tools": {"net-tools"}, "traceroute": {"traceroute"}, "netcat": {"netcat-openbsd"},
 		"nmap": {"nmap"}, "mtr": {"mtr-tiny"}, "tcpdump": {"tcpdump"}, "whois": {"whois"},
-		"docker": {"docker.io", "docker-compose-v2"}, "docker-compose": {"docker-compose-v2"},
 	}
 	darwin := map[string][]string{
 		"curl": {"curl"}, "git": {"git"}, "rg": {"ripgrep"}, "fd": {"fd"}, "unzip": {"unzip"}, "nvim": {"neovim"},
@@ -286,7 +291,6 @@ func packageNames(goos, id string) []string {
 		"rust": {"rust"}, "java": {"cask:temurin"}, "clang": {"llvm"}, "ruby": {"ruby"}, "php": {"php"}, "lua": {"lua"},
 		"jq": {"jq"}, "wget": {"wget"}, "zip": {"zip"}, "fzf": {"fzf"}, "bat": {"bat"}, "tree": {"tree"}, "shellcheck": {"shellcheck"},
 		"ip": {"iproute2mac"}, "nmap": {"nmap"}, "mtr": {"mtr"},
-		"docker": {"cask:docker"}, "docker-compose": {"cask:docker"},
 	}
 	windows := map[string][]string{
 		"curl": {"cURL.cURL"}, "git": {"Git.Git"}, "rg": {"BurntSushi.ripgrep.MSVC"},
@@ -295,8 +299,6 @@ func packageNames(goos, id string) []string {
 		"rust": {"Rustlang.Rustup"}, "java": {"EclipseAdoptium.Temurin.21.JDK"}, "clang": {"LLVM.LLVM"}, "ruby": {"RubyInstallerTeam.RubyWithDevKit.3.3"}, "php": {"PHP.PHP.8.4"}, "lua": {"DEVCOM.Lua"},
 		"jq": {"jqlang.jq"}, "wget": {"JernejSimoncic.Wget"}, "zip": {"GnuWin32.Zip"}, "fzf": {"junegunn.fzf"}, "bat": {"sharkdp.bat"}, "shellcheck": {"koalaman.shellcheck"},
 		"netcat": {"Insecure.Nmap"}, "nmap": {"Insecure.Nmap"}, "whois": {"Microsoft.Sysinternals"},
-		"docker":         {"Docker.DockerDesktop"},
-		"docker-compose": {"Docker.DockerDesktop"},
 	}
 	switch goos {
 	case "linux":

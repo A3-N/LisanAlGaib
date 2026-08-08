@@ -6,6 +6,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY internal/connectors ./internal/connectors
 COPY internal/extensionhost ./internal/extensionhost
+COPY internal/files ./internal/files
 COPY internal/appconfig ./internal/appconfig
 COPY internal/safefile ./internal/safefile
 COPY internal/textsafe ./internal/textsafe
