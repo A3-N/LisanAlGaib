@@ -19,6 +19,7 @@ const (
 	workspaceImage             = "lisanalgaib:latest"
 	workspaceVolume            = "arrakis-usul"
 	workspaceNetwork           = "arrakis-shield-wall"
+	extensionControlNetwork    = "arrakis-extension-control"
 	sharedDirectoryEnvironment = "LISAN_SHARED_DIR"
 )
 
@@ -98,7 +99,7 @@ func RunDocker(ctx context.Context, options DockerOptions) (resultErr error) {
 			resultErr = errors.Join(resultErr, fmt.Errorf("cleanup launched Docker services: %w", err))
 		}
 	}()
-	connectorState, err = syncConnectors(ctx, root, options.Profile.Connectors, options.Stdout, options.Stderr)
+	connectorState, err = syncConnectors(ctx, root, sharedRoot, options.Profile.Connectors, options.Stdout, options.Stderr)
 	if err != nil {
 		return err
 	}
@@ -144,6 +145,7 @@ func dockerExecArguments(options DockerOptions, encoded string) []string {
 		"exec", "-e", "TERM=" + nonempty(os.Getenv("TERM"), "xterm-256color"),
 		"-e", "COLORTERM=" + nonempty(os.Getenv("COLORTERM"), "truecolor"),
 		"-e", appconfig.EnvironmentProfile + "=" + encoded,
+		"-e", "LISAN_SHARED_DIR=/home/fremen/shared",
 		"-e", "HOME=" + dockerUserHome(user),
 		"--user", user, "--workdir", workdir, "workspace", "lisan", "run",
 	}

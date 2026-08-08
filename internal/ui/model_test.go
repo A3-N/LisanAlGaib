@@ -47,8 +47,7 @@ func TestMouseTopBarAndTheme(t *testing.T) {
 }
 
 func TestRepeatedTopClickTogglesSidebarExceptFullWidthPagesAndExtensions(t *testing.T) {
-	profile := appconfig.ProfileFromPreset(appconfig.Presets[0], time.Now())
-	profile.Connectors[0].Enabled = true
+	profile := testExtensionProfile()
 	model := NewModelWithProfile(t.TempDir(), profile)
 	model.width = 120
 	model.height = 30
@@ -255,9 +254,8 @@ func TestOverviewArtworkUsesOnePositionedCanvas(t *testing.T) {
 	}
 }
 
-func TestExtensionsUseOneStickyMenuAndManifestDrivenPanels(t *testing.T) {
-	profile := appconfig.ProfileFromPreset(appconfig.Presets[0], time.Now())
-	profile.Connectors[0].Enabled = true
+func TestExtensionsUseOneStickyMenuAndProtocolV3Surfaces(t *testing.T) {
+	profile := testExtensionProfile()
 	custom := appconfig.ConnectorConfig{
 		ID: "custom-probe", Name: "Custom Probe", Icon: "󰒍", Enabled: true,
 		Container: "custom-probe", Network: "arrakis-shield-wall", Endpoint: "http://custom-probe:7777",
@@ -269,7 +267,7 @@ func TestExtensionsUseOneStickyMenuAndManifestDrivenPanels(t *testing.T) {
 		if item.Name == "Extensions" && item.Section == sectionExtensions {
 			extensionTabs++
 		}
-		if item.Name == "Ixian Proving Ground" || item.Name == "Custom Probe" {
+		if item.Name == "Pardot Observatory" || item.Name == "Custom Probe" {
 			t.Fatalf("extension leaked into the top bar as its own tab: %#v", model.navigation)
 		}
 	}
@@ -280,37 +278,30 @@ func TestExtensionsUseOneStickyMenuAndManifestDrivenPanels(t *testing.T) {
 		{
 			Config: profile.Connectors[0], Online: true,
 			Manifest: connectorapi.Manifest{
-				ProtocolVersion: connectorapi.ProtocolVersion, ID: "ixian-proving-ground", Name: "Ixian Proving Ground",
-				UI: connectorapi.UIConfig{
-					Sidebar: []connectorapi.Panel{
-						{ID: "tools", Title: "Tools", Kind: connectorapi.PanelTools, Expanded: true},
-						{ID: "actions", Title: "Actions", Kind: connectorapi.PanelActions, Expanded: true},
-					},
-					Main: []connectorapi.Panel{{ID: "summary", Title: "Summary", Kind: connectorapi.PanelSummary}},
-				},
-				Tools:   []connectorapi.Tool{{ID: "uname", Name: "uname", Ready: true}},
-				Actions: []connectorapi.Action{{ID: "hostname", Name: "Host name"}},
+				ProtocolVersion: connectorapi.ProtocolVersion, ID: "pardot-observatory", Name: "Pardot Observatory", Version: "3.0.0",
+				Views:    []connectorapi.ViewDescriptor{{ID: "overview", Title: "Overview", Default: true}},
+				Actions:  []connectorapi.ActionDescriptor{{ID: "hostname", Name: "Host name", Inputs: []connectorapi.InputSpec{{ID: "scope", Label: "Scope", Kind: connectorapi.InputText}}}},
+				Sessions: []connectorapi.SessionDescriptor{{ID: "console", Name: "Console"}},
 			},
+			Views: map[string]connectorapi.View{"overview": {ID: "overview", Title: "Overview"}},
 		},
 		{
 			Config: profile.Connectors[1], Online: true,
 			Manifest: connectorapi.Manifest{
-				ProtocolVersion: connectorapi.ProtocolVersion, ID: "custom-probe", Name: "Custom Probe",
-				UI: connectorapi.UIConfig{
-					Sidebar: []connectorapi.Panel{{ID: "actions", Title: "Diagnostics", Kind: connectorapi.PanelActions, Expanded: true}},
-					Main:    []connectorapi.Panel{{ID: "output", Title: "Output", Kind: connectorapi.PanelActionOutput}},
-				},
-				Actions: []connectorapi.Action{{ID: "probe", Name: "Probe"}},
+				ProtocolVersion: connectorapi.ProtocolVersion, ID: "custom-probe", Name: "Custom Probe", Version: "3.0.0",
+				Views:   []connectorapi.ViewDescriptor{{ID: "probe", Title: "Probe", Default: true}},
+				Actions: []connectorapi.ActionDescriptor{{ID: "probe", Name: "Probe"}},
 			},
+			Views: map[string]connectorapi.View{"probe": {ID: "probe", Title: "Probe"}},
 		},
 	}
 	model.extensionsOpen = true
 	model.selectSection(sectionExtensions)
-	if model.page != pageConnector || model.selectedAction != "hostname" {
-		t.Fatalf("extension page did not select its advertised action: page=%v action=%q", model.page, model.selectedAction)
+	if model.page != pageConnector || model.selectedView != "overview" || model.selectedAction != "" {
+		t.Fatalf("extension page did not select its default view: page=%v view=%q action=%q", model.page, model.selectedView, model.selectedAction)
 	}
-	if firstRowOfKind(model.sidebarRows(), rowConnectorTool) < 0 || firstRowOfKind(model.sidebarRows(), rowConnectorAction) < 0 {
-		t.Fatal("Ixian Proving Ground manifest panels were not rendered")
+	if firstRowOfKind(model.sidebarRows(), rowConnectorView) < 0 || firstRowOfKind(model.sidebarRows(), rowConnectorAction) < 0 || firstRowOfKind(model.sidebarRows(), rowConnectorSession) < 0 {
+		t.Fatal("protocol v3 surfaces were not rendered")
 	}
 
 	var customX int
@@ -324,8 +315,8 @@ func TestExtensionsUseOneStickyMenuAndManifestDrivenPanels(t *testing.T) {
 	if !model.extensionsOpen || model.selectedConnector != "custom-probe" {
 		t.Fatal("selecting an extension closed its sticky menu")
 	}
-	if firstRowOfKind(model.sidebarRows(), rowConnectorTool) >= 0 || firstRowOfKind(model.sidebarRows(), rowConnectorAction) < 0 {
-		t.Fatal("custom actions-only layout was not honored")
+	if firstRowOfKind(model.sidebarRows(), rowConnectorView) < 0 || firstRowOfKind(model.sidebarRows(), rowConnectorAction) < 0 || firstRowOfKind(model.sidebarRows(), rowConnectorSession) >= 0 {
+		t.Fatal("custom manifest surface was not honored")
 	}
 
 	var extensionX int
@@ -456,20 +447,19 @@ func TestToolsCategoriesStartCollapsed(t *testing.T) {
 }
 
 func TestExtensionCycleRetainsMenuAndSelectedAction(t *testing.T) {
-	profile := appconfig.ProfileFromPreset(appconfig.Presets[0], time.Now())
-	profile.Connectors[0].Enabled = true
+	profile := testExtensionProfile()
 	model := NewModelWithProfile(t.TempDir(), profile)
 	model.connectors = []connectorapi.State{{
 		Config: profile.Connectors[0], Online: true,
 		Manifest: connectorapi.Manifest{
 			ProtocolVersion: connectorapi.ProtocolVersion,
-			ID:              "ixian-proving-ground",
-			Name:            "Ixian Proving Ground",
-			UI: connectorapi.UIConfig{Sidebar: []connectorapi.Panel{{
-				ID: "actions", Title: "Actions", Kind: connectorapi.PanelActions, Expanded: true,
-			}}},
-			Actions: []connectorapi.Action{{ID: "hostname", Name: "Host name"}, {ID: "system", Name: "System information"}},
+			ID:              "pardot-observatory",
+			Name:            "Pardot Observatory",
+			Version:         "3.0.0",
+			Views:           []connectorapi.ViewDescriptor{{ID: "overview", Title: "Overview", Default: true}},
+			Actions:         []connectorapi.ActionDescriptor{{ID: "hostname", Name: "Host name"}, {ID: "system", Name: "System information"}},
 		},
+		Views: map[string]connectorapi.View{"overview": {ID: "overview", Title: "Overview"}},
 	}}
 
 	model.selectSection(sectionExtensions)
@@ -628,8 +618,7 @@ func TestEmbeddedTerminalScreenUsesTheNaturalLeftEdge(t *testing.T) {
 }
 
 func TestExtensionOutputWrapsToThePane(t *testing.T) {
-	profile := appconfig.ProfileFromPreset(appconfig.Presets[0], time.Now())
-	profile.Connectors[0].Enabled = true
+	profile := testExtensionProfile()
 	model := NewModelWithProfile(t.TempDir(), profile)
 	model.width = 32
 	model.height = 24
@@ -644,18 +633,14 @@ func TestExtensionOutputWrapsToThePane(t *testing.T) {
 			ProtocolVersion: connectorapi.ProtocolVersion,
 			ID:              profile.Connectors[0].ID,
 			Name:            profile.Connectors[0].Name,
-			UI: connectorapi.UIConfig{
-				Sidebar: []connectorapi.Panel{{ID: "actions", Title: "Actions", Kind: connectorapi.PanelActions}},
-				Main:    []connectorapi.Panel{{ID: "output", Title: "Output", Kind: connectorapi.PanelActionOutput}},
-			},
-			Actions: []connectorapi.Action{{ID: "wrapped", Name: "Wrapped"}},
+			Version:         "3.0.0",
+			Views:           []connectorapi.ViewDescriptor{{ID: "overview", Title: "Overview"}},
+			Actions:         []connectorapi.ActionDescriptor{{ID: "wrapped", Name: "Wrapped"}},
 		},
 	}}
 	longLine := "  │ " + strings.Repeat("a", 70) + "TAIL"
-	model.connectorOutput[profile.Connectors[0].ID] = connectorapi.RunResponse{
-		ActionID: "wrapped",
-		Output:   strings.TrimPrefix(longLine, "  │ ") + "\n",
-	}
+	model.connectorJobs[profile.Connectors[0].ID] = connectorapi.Job{ID: "job", ActionID: "wrapped", Status: connectorapi.JobSucceeded, Progress: 100, Result: strings.TrimPrefix(longLine, "  │ ")}
+	model.selectedAction = "wrapped"
 
 	width, height := model.mainPaneWidth(), model.mainContentHeight()
 	rendered := model.renderMain(theme.All[0], width, height)
@@ -670,8 +655,7 @@ func TestExtensionOutputWrapsToThePane(t *testing.T) {
 }
 
 func TestExtensionOutputSupportsVerticalKeysAndWheel(t *testing.T) {
-	profile := appconfig.ProfileFromPreset(appconfig.Presets[0], time.Now())
-	profile.Connectors[0].Enabled = true
+	profile := testExtensionProfile()
 	model := NewModelWithProfile(t.TempDir(), profile)
 	model.width = 72
 	model.height = 14
@@ -686,16 +670,16 @@ func TestExtensionOutputSupportsVerticalKeysAndWheel(t *testing.T) {
 			ProtocolVersion: connectorapi.ProtocolVersion,
 			ID:              profile.Connectors[0].ID,
 			Name:            profile.Connectors[0].Name,
-			UI: connectorapi.UIConfig{
-				Main: []connectorapi.Panel{{ID: "output", Title: "Output", Kind: connectorapi.PanelActionOutput}},
-			},
+			Version:         "3.0.0",
+			Views:           []connectorapi.ViewDescriptor{{ID: "overview", Title: "Overview"}},
 		},
 	}}
-	var output strings.Builder
+	var output []string
 	for index := range 30 {
-		fmt.Fprintf(&output, "line-%02d\n", index)
+		output = append(output, fmt.Sprintf("line-%02d", index))
 	}
-	model.connectorOutput[profile.Connectors[0].ID] = connectorapi.RunResponse{ActionID: "long", Output: output.String()}
+	model.connectorJobs[profile.Connectors[0].ID] = connectorapi.Job{ID: "job", ActionID: "long", Status: connectorapi.JobSucceeded, Progress: 100, Logs: output}
+	model.selectedAction = "long"
 
 	width, height := model.mainPaneWidth(), model.mainContentHeight()
 	if initial := model.renderMain(theme.All[0], width, height); !strings.Contains(initial, "line-00") || strings.Contains(initial, "line-29") {
@@ -716,6 +700,214 @@ func TestExtensionOutputSupportsVerticalKeysAndWheel(t *testing.T) {
 	model.handleKey("home")
 	if model.extensionScrollY != 0 {
 		t.Fatalf("Home left extension offset at %d", model.extensionScrollY)
+	}
+}
+
+func TestExtensionTypedInputsAreGenericCoreState(t *testing.T) {
+	profile := testExtensionProfile()
+	model := NewModelWithProfile(t.TempDir(), profile)
+	inputs := []connectorapi.InputSpec{
+		{ID: "subject", Label: "Subject", Kind: connectorapi.InputText, Default: "spice"},
+		{ID: "deep", Label: "Deep", Kind: connectorapi.InputBoolean, Default: "false"},
+		{ID: "detail", Label: "Detail", Kind: connectorapi.InputSelect, Default: "brief", Options: []connectorapi.InputOption{{Value: "brief", Label: "Brief"}, {Value: "deep", Label: "Deep"}}},
+	}
+	state := connectorapi.State{Config: profile.Connectors[0], Online: true, Manifest: connectorapi.Manifest{
+		ProtocolVersion: connectorapi.ProtocolVersion, ID: profile.Connectors[0].ID, Name: profile.Connectors[0].Name, Version: "3.0.0",
+		Views:   []connectorapi.ViewDescriptor{{ID: "overview", Title: "Overview"}},
+		Actions: []connectorapi.ActionDescriptor{{ID: "survey", Name: "Survey", Inputs: inputs}},
+	}}
+	model.connectors = []connectorapi.State{state}
+	model.seedConnectorInputs(state)
+	model.selectedConnector, model.selectedAction = state.Config.ID, "survey"
+	model.beginConnectorInput("survey", "deep")
+	model.beginConnectorInput("survey", "detail")
+	model.beginConnectorInput("survey", "subject")
+	model.handleExtensionInputKey("backspace")
+	model.handleExtensionInputKey("enter")
+	values := model.connectorActionInputs(state.Config.ID, "survey")
+	if values["deep"] != "true" || values["detail"] != "deep" || values["subject"] != "spic" {
+		t.Fatalf("typed inputs were not edited by kind: %#v", values)
+	}
+}
+
+func TestExtensionControlsHaveCoreOwnedAffordances(t *testing.T) {
+	profile := testExtensionProfile()
+	model := NewModelWithProfile(t.TempDir(), profile)
+	inputs := []connectorapi.InputSpec{
+		{ID: "subject", Label: "Subject", Kind: connectorapi.InputText, Default: "spice"},
+		{ID: "count", Label: "Count", Kind: connectorapi.InputNumber, Default: "2"},
+		{ID: "deep", Label: "Deep scan", Kind: connectorapi.InputBoolean, Default: "true"},
+		{ID: "detail", Label: "Detail", Kind: connectorapi.InputSelect, Default: "brief", Options: []connectorapi.InputOption{{Value: "brief", Label: "Brief"}}},
+	}
+	state := connectorapi.State{Config: profile.Connectors[0], Online: true, Manifest: connectorapi.Manifest{
+		ProtocolVersion: connectorapi.ProtocolVersion, ID: profile.Connectors[0].ID, Name: profile.Connectors[0].Name, Version: "3.0.0",
+		Views:    []connectorapi.ViewDescriptor{{ID: "overview", Title: "Overview"}},
+		Actions:  []connectorapi.ActionDescriptor{{ID: "survey", Name: "Survey", Inputs: inputs}, {ID: "report", Name: "Report", Inputs: inputs[:1]}},
+		Sessions: []connectorapi.SessionDescriptor{{ID: "console", Name: "Field console"}},
+	}}
+	model.connectors = []connectorapi.State{state}
+	model.seedConnectorInputs(state)
+	model.selectedConnector, model.selectedView, model.selectedAction = state.Config.ID, "", "survey"
+	model.connectorJobs[state.Config.ID] = connectorapi.Job{Artifacts: []connectorapi.Artifact{{ID: "report", Name: "report.txt", Size: 42}}}
+
+	rows := model.connectorRows()
+	joined := ""
+	for _, row := range rows {
+		joined += row.Label + " " + row.Subtitle + "\n"
+		if row.Kind == rowCategory && strings.Contains(row.Label, "[ ") {
+			t.Fatalf("collapse category looks like an action button: %#v", row)
+		}
+	}
+	for _, expected := range []string{
+		"○ VIEW  Overview", "● Survey", "○ Report", "○ Field console", "○ report.txt",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("core affordances omitted %q:\n%s", expected, joined)
+		}
+	}
+	for _, clutter := range []string{"[ RUN ]", "[ SET ]", "[ OPEN ]", "[ SAVE ]", "TEXT", "NUMBER", "TOGGLE", "SELECT"} {
+		if strings.Contains(joined, clutter) {
+			t.Fatalf("sidebar contains main-pane control %q:\n%s", clutter, joined)
+		}
+	}
+
+	rendered := ansi.Strip(strings.Join(model.extensionActionLines(state), "\n"))
+	for _, expected := range []string{"TEXT  Subject", "NUMBER  Count", "TOGGLE  Deep scan", "SELECT  Detail", "RUN SURVEY"} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("action form omitted %q:\n%s", expected, rendered)
+		}
+	}
+}
+
+func TestExtensionMainPaneControlsAreClickable(t *testing.T) {
+	profile := testExtensionProfile()
+	model := NewModelWithProfile(t.TempDir(), profile)
+	model.width, model.height = 100, 32
+	model.section, model.page, model.sidebar = sectionExtensions, pageConnector, true
+	inputs := []connectorapi.InputSpec{
+		{ID: "subject", Label: "Subject", Kind: connectorapi.InputText, Default: "spice"},
+		{ID: "count", Label: "Count", Kind: connectorapi.InputNumber, Default: "2"},
+		{ID: "deep", Label: "Deep scan", Kind: connectorapi.InputBoolean, Default: "false"},
+		{ID: "detail", Label: "Detail", Kind: connectorapi.InputSelect, Default: "brief", Options: []connectorapi.InputOption{{Value: "brief", Label: "Brief"}, {Value: "deep", Label: "Deep"}}},
+	}
+	state := connectorapi.State{Config: profile.Connectors[0], Online: true, Manifest: connectorapi.Manifest{
+		ProtocolVersion: connectorapi.ProtocolVersion, ID: profile.Connectors[0].ID, Name: profile.Connectors[0].Name, Version: "3.0.0",
+		Actions: []connectorapi.ActionDescriptor{{ID: "survey", Name: "Survey", Inputs: inputs}},
+	}}
+	model.connectors = []connectorapi.State{state}
+	model.seedConnectorInputs(state)
+	model.selectedConnector, model.selectedAction = state.Config.ID, "survey"
+
+	clickControl := func(index int) tea.Cmd {
+		document := model.visibleConnectorDocument(max(model.mainPaneWidth()-1, 1), model.mainContentHeight())
+		for y, line := range document {
+			if !line.Interactive || line.ControlIndex != index {
+				continue
+			}
+			plain := ansi.Strip(line.Text)
+			start := visibleWidth(plain) - visibleWidth(strings.TrimLeft(plain, " "))
+			return model.handleClick(tea.MouseClickMsg{X: sidebarWidth + start, Y: model.topHeight() + y, Button: tea.MouseLeft})
+		}
+		t.Fatalf("control %d was not visible", index)
+		return nil
+	}
+
+	clickControl(0)
+	if model.extensionInputEdit != "survey:subject" {
+		t.Fatalf("text field click did not enter editing: %q", model.extensionInputEdit)
+	}
+	model.handleExtensionInputKey("esc")
+	clickControl(2)
+	if got := model.connectorInputValue(state.Config.ID, "survey", "deep"); got != "true" {
+		t.Fatalf("toggle click produced %q, want true", got)
+	}
+	clickControl(3)
+	if got := model.connectorInputValue(state.Config.ID, "survey", "detail"); got != "deep" {
+		t.Fatalf("select click produced %q, want deep", got)
+	}
+	if cmd := clickControl(4); cmd == nil || !model.connectorRunning[state.Config.ID] {
+		t.Fatal("dedicated Run button did not start the selected action")
+	}
+}
+
+func TestExtensionSidebarSelectionNeverExecutes(t *testing.T) {
+	profile := testExtensionProfile()
+	model := NewModelWithProfile(t.TempDir(), profile)
+	state := connectorapi.State{Config: profile.Connectors[0], Online: true, Manifest: connectorapi.Manifest{
+		ProtocolVersion: connectorapi.ProtocolVersion, ID: profile.Connectors[0].ID, Name: profile.Connectors[0].Name, Version: "3.0.0",
+		Actions:  []connectorapi.ActionDescriptor{{ID: "survey", Name: "Survey"}},
+		Sessions: []connectorapi.SessionDescriptor{{ID: "console", Name: "Console"}},
+	}}
+	model.connectors = []connectorapi.State{state}
+	model.selectedConnector = state.Config.ID
+	rows := model.connectorRows()
+
+	action := firstRowOfKind(rows, rowConnectorAction)
+	if cmd := model.activateRow(rows, action); cmd != nil || model.connectorRunning[state.Config.ID] {
+		t.Fatal("selecting an action in the sidebar executed it")
+	}
+	rows = model.connectorRows()
+	session := firstRowOfKind(rows, rowConnectorSession)
+	if cmd := model.activateRow(rows, session); cmd != nil {
+		t.Fatal("selecting a session in the sidebar opened it")
+	}
+	if controls := model.extensionMainControls(); len(controls) != 1 || controls[0].Kind != extensionControlOpen {
+		t.Fatalf("session did not expose one dedicated main-pane Open button: %#v", controls)
+	}
+}
+
+func TestControlCQuitsOverviewBeforeStaleCapture(t *testing.T) {
+	model := NewModel(t.TempDir())
+	model.section, model.page = sectionOverview, pageOverview
+	model.extensionSessionCapture = true
+	model.extensionInputEdit = "stale:field"
+	_, cmd := model.Update(tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModCtrl}))
+	if cmd == nil {
+		t.Fatal("Ctrl-C returned no quit command")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("Ctrl-C returned %T, want tea.QuitMsg", cmd())
+	}
+}
+
+func TestExtensionControlPaletteUsesExistingThemeRoles(t *testing.T) {
+	theme := theme.All[0]
+	tests := []struct {
+		name string
+		row  sidebarRow
+		want string
+	}{
+		{name: "collapse", row: sidebarRow{Kind: rowCategory}, want: theme.Secondary},
+		{name: "selected action", row: sidebarRow{Kind: rowConnectorAction, Active: true}, want: theme.Primary},
+		{name: "selected artifact", row: sidebarRow{Kind: rowConnectorArtifact, Active: true}, want: theme.Success},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			foreground, _, _ := sidebarRowPalette(test.row, theme)
+			if foreground != test.want {
+				t.Fatalf("foreground %q, want theme role %q", foreground, test.want)
+			}
+		})
+	}
+}
+
+func TestExtensionStructuredBlocksRenderWithoutDomainBranches(t *testing.T) {
+	blocks := []connectorapi.Block{
+		{ID: "status", Kind: connectorapi.BlockStatus, Tone: connectorapi.ToneSuccess, Text: "ready"},
+		{ID: "fields", Kind: connectorapi.BlockKeyValue, Fields: []connectorapi.FieldValue{{Label: "Region", Value: "Arrakeen"}}},
+		{ID: "list", Kind: connectorapi.BlockList, Items: []connectorapi.ListItem{{Label: "Trace", Detail: "stable"}}},
+		{ID: "table", Kind: connectorapi.BlockTable, Columns: []connectorapi.Column{{ID: "id", Title: "ID"}}, Rows: [][]string{{"01"}}},
+		{ID: "progress", Kind: connectorapi.BlockProgress, Progress: 50, Detail: "sampling"},
+	}
+	var rendered []string
+	for _, block := range blocks {
+		rendered = append(rendered, renderExtensionBlock(block)...)
+	}
+	joined := strings.Join(rendered, "\n")
+	for _, expected := range []string{"ready", "Arrakeen", "stable", "01", "50%", "sampling"} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("structured renderer omitted %q: %s", expected, joined)
+		}
 	}
 }
 
@@ -786,4 +978,16 @@ func TestAgentWorkingDirUsesPreparedWorkspace(t *testing.T) {
 	if got := agentWorkingDir(root, "missing"); got != root {
 		t.Fatalf("missing prepared workspace should fall back to root, got %q", got)
 	}
+}
+
+func testExtensionProfile() appconfig.Profile {
+	profile := appconfig.ProfileFromPreset(appconfig.Presets[0], time.Now())
+	profile.Connectors = []appconfig.ConnectorConfig{{
+		ID: "pardot-observatory", Name: "Pardot Observatory", Icon: "󰆤", Enabled: true, Managed: true,
+		Bundle: "extensions/pardot-observatory", Version: "3.0.0", Image: "fixture:3", BuildContext: ".",
+		Dockerfile: "extensions/pardot-observatory/Dockerfile", NativeExecutable: "extensions/pardot-observatory/bin/test",
+		Container: "lisan-pardot-observatory", User: "65532:65532", Network: "arrakis-extension-control",
+		Endpoint: "http://lisan-pardot-observatory:7777",
+	}}
+	return profile
 }

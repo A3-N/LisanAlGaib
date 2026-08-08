@@ -5,19 +5,25 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"lisanalgaib/internal/appconfig"
 	"lisanalgaib/internal/cliout"
-	"lisanalgaib/internal/extensionhost"
+	"lisanalgaib/internal/connectors"
 )
 
-// NativeRuntime owns only extension hosts started for the current Wormsign
-// launch. Their endpoints live in the returned in-memory profile and never
-// replace the Docker endpoints saved in config.
+// NativeRuntime owns extension processes started for one vm launch. A release
+// runs the platform binary packed beside each bundle; a source checkout may
+// fall back to `go run` for extension development.
 type NativeRuntime struct {
-	hosts []*extensionhost.Host
+	processes []*exec.Cmd
+	temporary []string
 }
 
 func StartNativeConnectors(ctx context.Context, runtimeRoot string, profile appconfig.Profile, output io.Writer) (appconfig.Profile, *NativeRuntime, error) {
@@ -25,57 +31,171 @@ func StartNativeConnectors(ctx context.Context, runtimeRoot string, profile appc
 	if err != nil {
 		return profile, nil, err
 	}
-	profile = validated
-	active := profile.Clone()
-	runtime := &NativeRuntime{}
+	active := validated.Clone()
+	runtimeState := &NativeRuntime{}
 	fail := func(err error) (appconfig.Profile, *NativeRuntime, error) {
-		return profile, nil, errors.Join(err, runtime.Close())
+		return profile, nil, errors.Join(err, runtimeState.Close())
 	}
 	for index := range active.Connectors {
 		connector := &active.Connectors[index]
 		if !connector.Enabled || !connector.Managed {
 			continue
 		}
-		if strings.TrimSpace(connector.NativeConfig) == "" {
-			return fail(fmt.Errorf("managed extension %s has no native_config for vm mode", connector.ID))
-		}
-		configPath, err := resolveRuntimePath(runtimeRoot, connector.NativeConfig)
+		listen, err := availableLoopbackAddress()
 		if err != nil {
-			return fail(fmt.Errorf("native extension %s config: %w", connector.ID, err))
+			return fail(fmt.Errorf("allocate native extension %s endpoint: %w", connector.ID, err))
 		}
-		config, err := extensionhost.LoadConfig(configPath)
-		if err != nil {
-			return fail(fmt.Errorf("native extension %s: %w", connector.ID, err))
-		}
-		if config.Manifest.ID != connector.ID {
-			return fail(fmt.Errorf("native extension config id %q does not match profile id %q", config.Manifest.ID, connector.ID))
-		}
-		host, err := extensionhost.StartNative(ctx, configPath)
+		command, temporary, err := nativeExtensionCommand(ctx, runtimeRoot, *connector, listen)
 		if err != nil {
 			return fail(err)
 		}
-		runtime.hosts = append(runtime.hosts, host)
-		connector.Endpoint = host.Endpoint()
+		if temporary != "" {
+			runtimeState.temporary = append(runtimeState.temporary, temporary)
+		}
+		command.Dir = runtimeRoot
+		command.Env, err = nativeExtensionEnvironment(*connector, listen)
+		if err != nil {
+			return fail(err)
+		}
+		command.Stdout = output
+		command.Stderr = output
+		if err := command.Start(); err != nil {
+			return fail(fmt.Errorf("start native extension %s: %w", connector.ID, err))
+		}
+		runtimeState.processes = append(runtimeState.processes, command)
+		connector.Endpoint = "http://" + listen
 		connector.Network = "native-loopback"
+		if err := waitForNativeExtension(ctx, *connector, command); err != nil {
+			return fail(err)
+		}
 		if output != nil {
 			cliout.Success(output, "Starting extension "+connector.Name)
 			cliout.Detail(output, "endpoint", connector.Endpoint)
 		}
 	}
-	return active, runtime, nil
+	return active, runtimeState, nil
 }
 
-func (r *NativeRuntime) Close() error {
-	if r == nil {
+func availableLoopbackAddress() (string, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", err
+	}
+	address := listener.Addr().String()
+	return address, listener.Close()
+}
+
+func nativeExtensionCommand(ctx context.Context, root string, connector appconfig.ConnectorConfig, listen string) (*exec.Cmd, string, error) {
+	executable, err := resolveRuntimePath(root, connector.NativeExecutable)
+	if err == nil {
+		arguments := append([]string{"--listen", listen}, connector.NativeArguments...)
+		return exec.CommandContext(ctx, executable, arguments...), "", nil
+	}
+	if strings.TrimSpace(connector.NativePackage) == "" {
+		return nil, "", fmt.Errorf("native extension %s executable: %w", connector.ID, err)
+	}
+	if _, lookErr := exec.LookPath("go"); lookErr != nil {
+		return nil, "", fmt.Errorf("native extension %s executable is missing and Go is unavailable for source fallback", connector.ID)
+	}
+	packagePath := strings.TrimPrefix(filepath.ToSlash(connector.NativePackage), "./")
+	if _, pathErr := resolveRuntimePath(root, packagePath); pathErr != nil {
+		return nil, "", fmt.Errorf("native extension %s source package: %w", connector.ID, pathErr)
+	}
+	temporary, err := os.MkdirTemp("", "lisan-extension-"+connector.ID+"-*")
+	if err != nil {
+		return nil, "", err
+	}
+	binaryName := connector.ID
+	if runtime.GOOS == "windows" {
+		binaryName += ".exe"
+	}
+	binary := filepath.Join(temporary, binaryName)
+	build := exec.CommandContext(ctx, "go", "build", "-trimpath", "-buildvcs=false", "-o", binary, "./"+packagePath)
+	build.Dir = root
+	if output, buildErr := build.CombinedOutput(); buildErr != nil {
+		_ = os.RemoveAll(temporary)
+		return nil, "", fmt.Errorf("build native extension %s: %w: %s", connector.ID, buildErr, strings.TrimSpace(string(output)))
+	}
+	arguments := []string{"--listen", listen}
+	arguments = append(arguments, connector.NativeArguments...)
+	return exec.CommandContext(ctx, binary, arguments...), temporary, nil
+}
+
+func nativeExtensionEnvironment(connector appconfig.ConnectorConfig, listen string) ([]string, error) {
+	environment := append([]string(nil), os.Environ()...)
+	stateDirectory, sharedDirectory := "", ""
+	if connector.Grants.PersistentState {
+		configRoot, err := os.UserConfigDir()
+		if err != nil {
+			return nil, fmt.Errorf("locate extension state directory: %w", err)
+		}
+		stateDirectory = filepath.Join(configRoot, "lisanalgaib", "extensions", connector.ID)
+		if err := os.MkdirAll(stateDirectory, 0o700); err != nil {
+			return nil, fmt.Errorf("create extension state directory: %w", err)
+		}
+	}
+	if connector.Grants.SharedRead {
+		sharedDirectory = strings.TrimSpace(os.Getenv("LISAN_SHARED_DIR"))
+	}
+	for _, value := range connector.Environment {
+		environment = append(environment, value)
+	}
+	environment = append(environment,
+		"LISAN_EXTENSION_ID="+connector.ID,
+		"LISAN_EXTENSION_LISTEN="+listen,
+		"LISAN_EXTENSION_STATE="+stateDirectory,
+		"LISAN_EXTENSION_SHARED="+sharedDirectory,
+	)
+	return environment, nil
+}
+
+func waitForNativeExtension(ctx context.Context, connector appconfig.ConnectorConfig, command *exec.Cmd) error {
+	deadline := time.NewTimer(12 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		manifest, err := connectors.FetchManifest(ctx, connector.Endpoint)
+		if err == nil {
+			if manifest.ID != connector.ID {
+				return fmt.Errorf("native extension id %q does not match bundle id %q", manifest.ID, connector.ID)
+			}
+			return nil
+		}
+		if command.ProcessState != nil && command.ProcessState.Exited() {
+			return fmt.Errorf("native extension %s exited before becoming ready", connector.ID)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("native extension %s did not become ready", connector.ID)
+		case <-ticker.C:
+		}
+	}
+}
+
+func (runtimeState *NativeRuntime) Close() error {
+	if runtimeState == nil {
 		return nil
 	}
 	var result error
-	for index := len(r.hosts) - 1; index >= 0; index-- {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		err := r.hosts[index].Close(ctx)
-		cancel()
-		result = errors.Join(result, err)
+	for index := len(runtimeState.processes) - 1; index >= 0; index-- {
+		command := runtimeState.processes[index]
+		if command.Process == nil {
+			continue
+		}
+		if err := command.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			result = errors.Join(result, err)
+		}
+		_ = command.Wait()
 	}
-	r.hosts = nil
+	runtimeState.processes = nil
+	for _, directory := range runtimeState.temporary {
+		if err := os.RemoveAll(directory); err != nil {
+			result = errors.Join(result, err)
+		}
+	}
+	runtimeState.temporary = nil
 	return result
 }

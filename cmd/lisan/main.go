@@ -15,6 +15,7 @@ import (
 	"lisanalgaib/internal/cliout"
 	"lisanalgaib/internal/configui"
 	"lisanalgaib/internal/deps"
+	"lisanalgaib/internal/extensionbundle"
 	"lisanalgaib/internal/installer"
 	"lisanalgaib/internal/launcher"
 	"lisanalgaib/internal/lifecycle"
@@ -82,6 +83,20 @@ func run(arguments []string) (resultErr error) {
 	if err != nil {
 		return err
 	}
+	if !insideContainer {
+		runtimeRoot, rootErr := extensionbundle.FindRoot(document.RuntimeRoot)
+		if rootErr != nil {
+			return rootErr
+		}
+		bundles, discoverErr := extensionbundle.Discover(runtimeRoot)
+		if discoverErr != nil {
+			return discoverErr
+		}
+		extensionbundle.Reconcile(&document, bundles)
+		if active, ok := document.Active(); ok {
+			profile = active
+		}
+	}
 	if options.command == commandConfig {
 		_, _, err := configui.Run(document, configPath)
 		return err
@@ -111,6 +126,16 @@ func run(arguments []string) (resultErr error) {
 			if err != nil {
 				return fmt.Errorf("locate source runtime: %w", err)
 			}
+		}
+		sharedRoot := filepath.Join(runtimeRoot, "shared")
+		if document.RuntimeRoot != "" {
+			sharedRoot = filepath.Join(filepath.Dir(runtimeRoot), "shared")
+		}
+		if err := os.MkdirAll(sharedRoot, 0o755); err != nil {
+			return fmt.Errorf("prepare shared directory: %w", err)
+		}
+		if err := os.Setenv("LISAN_SHARED_DIR", sharedRoot); err != nil {
+			return err
 		}
 		if profile.Feature("files") || profile.Feature("agents") || profile.Tool("nvchad") {
 			if err := installer.SeedUserAssets(runtimeRoot, profile); err != nil {

@@ -59,8 +59,10 @@ const (
 	rowTool
 	rowPackage
 	rowAgent
-	rowConnectorTool
+	rowConnectorView
 	rowConnectorAction
+	rowConnectorSession
+	rowConnectorArtifact
 )
 
 type sidebarRow struct {
@@ -70,6 +72,7 @@ type sidebarRow struct {
 	Subtitle string
 	Depth    int
 	Expanded bool
+	Active   bool
 }
 
 type sectionViewState struct {
@@ -80,10 +83,30 @@ type sectionViewState struct {
 }
 
 type extensionViewState struct {
-	SelectedAction string
-	Cursor         int
-	Scroll         int
-	Vertical       int
+	SelectedView     string
+	SelectedAction   string
+	SelectedSession  string
+	SelectedArtifact string
+	Control          int
+	Cursor           int
+	Scroll           int
+	Vertical         int
+}
+
+type extensionControlKind int
+
+const (
+	extensionControlInput extensionControlKind = iota
+	extensionControlRun
+	extensionControlOpen
+	extensionControlSave
+)
+
+type extensionControl struct {
+	Kind       extensionControlKind
+	ActionID   string
+	InputID    string
+	ArtifactID string
 }
 
 type navItem struct {
@@ -198,47 +221,83 @@ type refreshMsg struct {
 type connectorActionMsg struct {
 	ConnectorID string
 	ActionID    string
-	Result      connectorapi.RunResponse
+	Job         connectorapi.Job
+	Err         error
+}
+
+type connectorJobPollMsg struct {
+	ConnectorID string
+	Job         connectorapi.Job
+	Err         error
+}
+
+type connectorSessionMsg struct {
+	ConnectorID string
+	Session     connectorapi.Session
+	ClearInput  bool
+	Capture     bool
+	Err         error
+}
+
+type connectorArtifactMsg struct {
+	ConnectorID string
+	Path        string
+	Err         error
+}
+
+type connectorViewsMsg struct {
+	ConnectorID string
+	Views       map[string]connectorapi.View
 	Err         error
 }
 
 type Model struct {
-	ctx                context.Context
-	cancel             context.CancelFunc
-	root               string
-	profile            appconfig.Profile
-	navigation         []navItem
-	width              int
-	height             int
-	section            section
-	page               page
-	previousPage       page
-	sidebar            bool
-	focusSidebar       bool
-	sidebarCursor      int
-	sidebarScroll      int
-	themeIndex         int
-	inventory          inventory.Snapshot
-	connectors         []connectorapi.State
-	extensionsOpen     bool
-	selectedConnector  string
-	selectedAction     string
-	connectorOutput    map[string]connectorapi.RunResponse
-	connectorRunning   map[string]bool
-	selectedTool       string
-	selectedAgent      string
-	editorPath         string
-	expanded           map[string]bool
-	sectionViews       map[section]sectionViewState
-	extensionViews     map[string]extensionViewState
-	extensionScrollY   int
-	loading            bool
-	status             string
-	sessions           map[string]*terminalhost.Session
-	starting           map[string]bool
-	capture            bool
-	terminalScrollY    int
-	terminalScrollback int
+	ctx                     context.Context
+	cancel                  context.CancelFunc
+	root                    string
+	profile                 appconfig.Profile
+	navigation              []navItem
+	width                   int
+	height                  int
+	section                 section
+	page                    page
+	previousPage            page
+	sidebar                 bool
+	focusSidebar            bool
+	sidebarCursor           int
+	sidebarScroll           int
+	themeIndex              int
+	inventory               inventory.Snapshot
+	connectors              []connectorapi.State
+	extensionsOpen          bool
+	selectedConnector       string
+	selectedView            string
+	selectedAction          string
+	selectedSession         string
+	selectedArtifact        string
+	connectorJobs           map[string]connectorapi.Job
+	connectorRunning        map[string]bool
+	connectorInputs         map[string]map[string]map[string]string
+	connectorSessions       map[string]connectorapi.Session
+	extensionInputEdit      string
+	extensionInputText      string
+	extensionControlCursor  int
+	extensionSessionCapture bool
+	extensionSessionInput   string
+	selectedTool            string
+	selectedAgent           string
+	editorPath              string
+	expanded                map[string]bool
+	sectionViews            map[section]sectionViewState
+	extensionViews          map[string]extensionViewState
+	extensionScrollY        int
+	loading                 bool
+	status                  string
+	sessions                map[string]*terminalhost.Session
+	starting                map[string]bool
+	capture                 bool
+	terminalScrollY         int
+	terminalScrollback      int
 }
 
 func NewModel(root string) *Model {
@@ -274,8 +333,10 @@ func NewModelWithProfile(root string, profile appconfig.Profile) *Model {
 		status:            "Scanning configured inventory and extensions…",
 		sessions:          make(map[string]*terminalhost.Session),
 		starting:          make(map[string]bool),
-		connectorOutput:   make(map[string]connectorapi.RunResponse),
+		connectorJobs:     make(map[string]connectorapi.Job),
 		connectorRunning:  make(map[string]bool),
+		connectorInputs:   make(map[string]map[string]map[string]string),
+		connectorSessions: make(map[string]connectorapi.Session),
 		sectionViews:      make(map[section]sectionViewState),
 		extensionViews:    make(map[string]extensionViewState),
 		selectedConnector: firstEnabledConnector(profile),
@@ -378,17 +439,18 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.clampCursor()
 		m.resizeVisibleSession()
 		m.clampExtensionScroll()
-		return m, nil
+		return m, m.resizeConnectorSession()
 	case refreshMsg:
 		m.inventory = msg.Inventory
 		m.connectors = msg.Connectors
 		for _, extension := range m.connectors {
-			for _, panel := range extension.Manifest.UI.Sidebar {
-				key := extensionPanelKey(extension.Config.ID, panel.ID)
+			for _, group := range []string{"views", "actions", "sessions", "artifacts"} {
+				key := extensionGroupKey(extension.Config.ID, group)
 				if _, exists := m.expanded[key]; !exists {
-					m.expanded[key] = panel.Expanded
+					m.expanded[key] = true
 				}
 			}
+			m.seedConnectorInputs(extension)
 		}
 		m.loading = false
 		online := 0
@@ -410,24 +472,73 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.ensureAgent(m.selectedAgent)
 		}
 		if m.section == sectionExtensions {
-			m.ensureSelectedExtensionAction()
+			m.ensureSelectedExtensionItems()
 			m.clampExtensionScroll()
 		}
 		return m, nil
 	case connectorActionMsg:
-		delete(m.connectorRunning, msg.ConnectorID)
 		if msg.Err != nil {
-			msg.Result.ActionID = msg.ActionID
-			msg.Result.Error = msg.Err.Error()
+			delete(m.connectorRunning, msg.ConnectorID)
+			m.status = "Extension action failed: " + msg.Err.Error()
+			return m, nil
 		}
-		m.connectorOutput[msg.ConnectorID] = msg.Result
+		m.connectorJobs[msg.ConnectorID] = msg.Job
 		m.extensionScrollY = 0
 		m.clampExtensionScroll()
-		if msg.Err != nil {
-			m.status = "Extension action failed: " + msg.Err.Error()
-		} else {
-			m.status = fmt.Sprintf("Extension action %s finished with exit %d", msg.ActionID, msg.Result.ExitCode)
+		if msg.Job.Terminal() {
+			delete(m.connectorRunning, msg.ConnectorID)
+			m.status = fmt.Sprintf("Extension action %s %s", msg.ActionID, msg.Job.Status)
+			return m, refreshConnectorViewsCmd(m.ctx, msg.ConnectorID, m.connectorEndpoint(msg.ConnectorID), m.connectorManifest(msg.ConnectorID).Views)
 		}
+		m.status = "Extension job " + msg.Job.ID + " " + msg.Job.Status
+		return m, pollConnectorJobCmd(m.ctx, msg.ConnectorID, m.connectorEndpoint(msg.ConnectorID), msg.Job.ID)
+	case connectorJobPollMsg:
+		if msg.Err != nil {
+			delete(m.connectorRunning, msg.ConnectorID)
+			m.status = "Extension job polling failed: " + msg.Err.Error()
+			return m, nil
+		}
+		m.connectorJobs[msg.ConnectorID] = msg.Job
+		m.clampExtensionScroll()
+		if msg.Job.Terminal() {
+			delete(m.connectorRunning, msg.ConnectorID)
+			m.status = "Extension job " + msg.Job.Status
+			return m, refreshConnectorViewsCmd(m.ctx, msg.ConnectorID, m.connectorEndpoint(msg.ConnectorID), m.connectorManifest(msg.ConnectorID).Views)
+		}
+		return m, pollConnectorJobCmd(m.ctx, msg.ConnectorID, m.connectorEndpoint(msg.ConnectorID), msg.Job.ID)
+	case connectorSessionMsg:
+		if msg.Err != nil {
+			m.status = "Extension session failed: " + msg.Err.Error()
+			return m, nil
+		}
+		m.connectorSessions[msg.ConnectorID] = msg.Session
+		if msg.ClearInput {
+			m.extensionSessionInput = ""
+		}
+		if msg.Capture {
+			m.extensionSessionCapture = msg.Session.Status == "open"
+		}
+		m.status = "Extension session " + msg.Session.Status
+		return m, nil
+	case connectorArtifactMsg:
+		if msg.Err != nil {
+			m.status = "Artifact export failed: " + msg.Err.Error()
+		} else {
+			m.status = "Artifact exported to " + msg.Path
+		}
+		return m, nil
+	case connectorViewsMsg:
+		if msg.Err != nil {
+			m.status = "Extension view refresh failed: " + msg.Err.Error()
+			return m, nil
+		}
+		for index := range m.connectors {
+			if m.connectors[index].Config.ID == msg.ConnectorID {
+				m.connectors[index].Views = msg.Views
+				break
+			}
+		}
+		m.clampExtensionScroll()
 		return m, nil
 	case terminalStartedMsg:
 		return m, m.handleTerminalStarted(msg)
@@ -445,6 +556,20 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMotionMsg:
 		return m, m.forwardMouse(msg)
 	case tea.KeyPressMsg:
+		if msg.String() == "ctrl+c" {
+			// Embedded terminals own Ctrl-C while they have input capture so a
+			// user can interrupt a child process. Everywhere else, including
+			// Overview with stale extension capture, Ctrl-C quits Lisan.
+			if session, _ := m.visibleSession(); session == nil || !m.capture {
+				return m, tea.Quit
+			}
+		}
+		if m.extensionInputEdit != "" {
+			return m, m.handleExtensionInputKey(msg.String())
+		}
+		if m.extensionSessionCapture {
+			return m, m.handleExtensionSessionKey(msg.String())
+		}
 		if session, id := m.visibleSession(); session != nil && m.capture {
 			if msg.String() == "ctrl+g" {
 				m.capture = false
@@ -561,6 +686,18 @@ func (m *Model) handleSidebarKey(key string) tea.Cmd {
 }
 
 func (m *Model) handleMainKey(key string) tea.Cmd {
+	if m.page == pageConnector {
+		switch key {
+		case "j", "down":
+			if m.moveExtensionControl(1) {
+				return nil
+			}
+		case "k", "up":
+			if m.moveExtensionControl(-1) {
+				return nil
+			}
+		}
+	}
 	switch key {
 	case "j", "down":
 		if m.scrollMainVertically(1) {
@@ -601,8 +738,16 @@ func (m *Model) handleMainKey(key string) tea.Cmd {
 			return m.ensureShell()
 		}
 	case pageConnector:
-		if key == "enter" || key == "i" {
-			return m.runSelectedConnectorAction()
+		if key == "enter" || key == " " || key == "i" {
+			if len(m.extensionMainControls()) > 0 {
+				return m.activateExtensionControl(m.extensionControlCursor)
+			}
+			if m.selectedSession != "" {
+				return m.openOrCaptureConnectorSession()
+			}
+		}
+		if key == "c" {
+			return m.cancelConnectorJob()
 		}
 	}
 	return nil
@@ -667,6 +812,16 @@ func (m *Model) handleClick(msg tea.MouseClickMsg) tea.Cmd {
 	}
 
 	m.focusSidebar = false
+	if m.page == pageConnector {
+		mainX := 0
+		if m.sidebarDrawn() {
+			mainX = sidebarWidth
+		}
+		if control, ok := m.extensionControlAt(x-mainX, y-topHeight); ok {
+			m.extensionControlCursor = control
+			return m.activateExtensionControl(control)
+		}
+	}
 	if session, id := m.visibleSession(); session != nil {
 		if id == shellSessionID && m.terminalScrollY > 0 {
 			m.moveTerminalVertically(true)
@@ -746,6 +901,12 @@ func (m *Model) moveMainVertically(toBottom bool) bool {
 }
 
 func (m *Model) selectSection(next section) tea.Cmd {
+	if next != sectionExtensions {
+		m.extensionInputEdit = ""
+		m.extensionInputText = ""
+		m.extensionSessionCapture = false
+		m.extensionSessionInput = ""
+	}
 	if next != m.section {
 		m.rememberSectionView()
 		m.blurVisibleSession()
@@ -826,19 +987,49 @@ func (m *Model) selectExtension(id string) tea.Cmd {
 	return nil
 }
 
-func (m *Model) ensureSelectedExtensionAction() {
-	rows := m.sidebarRows()
-	for _, row := range rows {
-		if row.Kind == rowConnectorAction && row.ID == m.selectedAction {
-			m.clampCursor()
-			return
+func (m *Model) ensureSelectedExtensionItems() {
+	state, ok := m.connectorState(m.selectedConnector)
+	if !ok || !state.Online {
+		return
+	}
+	viewExists := false
+	for _, descriptor := range state.Manifest.Views {
+		if descriptor.ID == m.selectedView {
+			viewExists = true
 		}
 	}
-	m.selectedAction = ""
-	if index := firstRowOfKind(rows, rowConnectorAction); index >= 0 {
-		m.sidebarCursor = index
-		m.selectedAction = rows[index].ID
+	actionExists := false
+	for _, descriptor := range state.Manifest.Actions {
+		actionExists = actionExists || descriptor.ID == m.selectedAction
 	}
+	sessionExists := false
+	for _, descriptor := range state.Manifest.Sessions {
+		sessionExists = sessionExists || descriptor.ID == m.selectedSession
+	}
+	artifactExists := false
+	for _, artifact := range m.connectorJobs[m.selectedConnector].Artifacts {
+		artifactExists = artifactExists || artifact.ID == m.selectedArtifact
+	}
+	if viewExists || actionExists || sessionExists || artifactExists {
+		m.clampExtensionControl()
+		m.clampCursor()
+		return
+	}
+	m.selectedView, m.selectedAction, m.selectedSession, m.selectedArtifact = "", "", "", ""
+	for _, descriptor := range state.Manifest.Views {
+		if descriptor.Default {
+			m.selectedView = descriptor.ID
+			break
+		}
+	}
+	if m.selectedView == "" && len(state.Manifest.Views) > 0 {
+		m.selectedView = state.Manifest.Views[0].ID
+	} else if m.selectedView == "" && len(state.Manifest.Actions) > 0 {
+		m.selectedAction = state.Manifest.Actions[0].ID
+	} else if m.selectedView == "" && len(state.Manifest.Sessions) > 0 {
+		m.selectedSession = state.Manifest.Sessions[0].ID
+	}
+	m.extensionControlCursor = 0
 	m.clampCursor()
 }
 
@@ -879,26 +1070,38 @@ func (m *Model) rememberExtensionView() {
 		return
 	}
 	m.extensionViews[m.selectedConnector] = extensionViewState{
-		SelectedAction: m.selectedAction,
-		Cursor:         m.sidebarCursor,
-		Scroll:         m.sidebarScroll,
-		Vertical:       m.extensionScrollY,
+		SelectedView:     m.selectedView,
+		SelectedAction:   m.selectedAction,
+		SelectedSession:  m.selectedSession,
+		SelectedArtifact: m.selectedArtifact,
+		Control:          m.extensionControlCursor,
+		Cursor:           m.sidebarCursor,
+		Scroll:           m.sidebarScroll,
+		Vertical:         m.extensionScrollY,
 	}
 }
 
 func (m *Model) restoreExtensionView(id string) {
 	if state, ok := m.extensionViews[id]; ok {
+		m.selectedView = state.SelectedView
 		m.selectedAction = state.SelectedAction
+		m.selectedSession = state.SelectedSession
+		m.selectedArtifact = state.SelectedArtifact
+		m.extensionControlCursor = state.Control
 		m.sidebarCursor = state.Cursor
 		m.sidebarScroll = state.Scroll
 		m.extensionScrollY = state.Vertical
 	} else {
+		m.selectedView = ""
 		m.selectedAction = ""
+		m.selectedSession = ""
+		m.selectedArtifact = ""
+		m.extensionControlCursor = 0
 		m.sidebarCursor = 0
 		m.sidebarScroll = 0
 		m.extensionScrollY = 0
 	}
-	m.ensureSelectedExtensionAction()
+	m.ensureSelectedExtensionItems()
 }
 
 func (m *Model) blurVisibleSession() {
@@ -972,17 +1175,44 @@ func (m *Model) activateRow(rows []sidebarRow, index int) tea.Cmd {
 		m.capture = true
 		m.clampCursor()
 		return m.ensureAgent(row.ID)
-	case rowConnectorTool:
+	case rowConnectorView:
+		m.selectedView = row.ID
+		m.selectedAction, m.selectedSession, m.selectedArtifact = "", "", ""
+		m.extensionControlCursor = 0
 		m.page = pageConnector
 		m.focusSidebar = false
 		m.capture = false
 	case rowConnectorAction:
 		m.selectedAction = row.ID
+		m.selectedView, m.selectedSession, m.selectedArtifact = "", "", ""
+		m.extensionControlCursor = 0
 		m.extensionScrollY = 0
 		m.page = pageConnector
 		m.focusSidebar = false
 		m.capture = false
-		return m.runSelectedConnectorAction()
+		if action, ok := m.connectorAction(row.ID); ok {
+			m.status = "Configure " + action.Name + " in the main pane"
+		}
+		m.clampCursor()
+		return nil
+	case rowConnectorSession:
+		m.selectedSession = row.ID
+		m.selectedView, m.selectedAction, m.selectedArtifact = "", "", ""
+		m.extensionControlCursor = 0
+		m.extensionScrollY = 0
+		m.page = pageConnector
+		m.focusSidebar = false
+		m.status = "Session selected · use Open in the main pane"
+		return nil
+	case rowConnectorArtifact:
+		m.selectedArtifact = row.ID
+		m.selectedView, m.selectedAction, m.selectedSession = "", "", ""
+		m.extensionControlCursor = 0
+		m.extensionScrollY = 0
+		m.page = pageConnector
+		m.focusSidebar = false
+		m.status = "Artifact selected · use Save in the main pane"
+		return nil
 	}
 	m.clampCursor()
 	return nil
@@ -993,7 +1223,7 @@ func (m *Model) revealRow(rows []sidebarRow, index int) tea.Cmd {
 		return nil
 	}
 	switch rows[index].Kind {
-	case rowTool, rowPackage, rowAgent:
+	case rowTool, rowPackage, rowAgent, rowConnectorView:
 		// Merely moving through the contextual pane updates the main pane.
 		// Agent rows also surface their live embedded session.
 	default:

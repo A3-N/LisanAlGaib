@@ -191,15 +191,39 @@ func TestPresetPreservesThirdPartyExtensionDefinitions(t *testing.T) {
 		Container: "custom", Network: "arrakis-shield-wall", Endpoint: "http://custom:7777",
 	})
 	model.applyPreset(3)
-	if len(model.working.Connectors) != 2 || model.working.Connectors[1].ID != "custom" {
+	if len(model.working.Connectors) != 1 || model.working.Connectors[0].ID != "custom" {
 		t.Fatalf("preset discarded custom extension: %#v", model.working.Connectors)
 	}
-	if model.working.Connectors[1].Enabled {
-		t.Fatal("minimal preset left a custom extension running")
+	if !model.working.Connectors[0].Enabled {
+		t.Fatal("preset unexpectedly changed extension lifecycle state")
 	}
 	model.applyPreset(0)
-	if len(model.working.Connectors) != 2 || !model.working.Connectors[1].Enabled {
-		t.Fatalf("full preset did not restore custom extension: %#v", model.working.Connectors)
+	if len(model.working.Connectors) != 1 || !model.working.Connectors[0].Enabled {
+		t.Fatalf("preset discarded or changed custom extension: %#v", model.working.Connectors)
+	}
+}
+
+func TestExtensionLifecycleAndGrantsAreSeparateChoices(t *testing.T) {
+	document := appconfig.DefaultDocument(time.Now())
+	document.Profiles[0].Connectors = []appconfig.ConnectorConfig{{
+		ID: "extension", Name: "Extension", Description: "Test", Managed: true,
+		Image: "extension:3", NativeExecutable: "extensions/extension/bin/extension",
+		Container: "lisan-extension", User: "10001:10001", Network: "control", Endpoint: "http://lisan-extension:7777",
+		Requests: appconfig.ExtensionGrants{PersistentState: true, SharedRead: true},
+	}}
+	model := New(document, filepath.Join(t.TempDir(), "config.json"))
+	grantRows := 0
+	for index, candidate := range model.rows() {
+		if candidate.kind != rowConnectorGrant {
+			continue
+		}
+		grantRows++
+		if candidate.grant == "persistent-state" {
+			model.activate(index)
+		}
+	}
+	if grantRows != 2 || !model.working.Connectors[0].Grants.PersistentState || model.working.Connectors[0].Enabled {
+		t.Fatalf("grant choices changed lifecycle or were incomplete: %#v", model.working.Connectors[0])
 	}
 }
 

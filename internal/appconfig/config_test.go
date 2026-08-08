@@ -1,6 +1,7 @@
 package appconfig
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -194,50 +195,35 @@ func TestWorkspaceContainerUserIsKnown(t *testing.T) {
 	}
 }
 
-func TestBundledExtensionIsOptInForEveryPreset(t *testing.T) {
+func TestCorePresetsContainNoHardcodedExtensions(t *testing.T) {
 	now := time.Now()
 	document := DefaultDocument(now)
 	active, _ := document.Active()
-	if len(active.Connectors) != 1 || active.Connectors[0].ID != "ixian-proving-ground" || active.Connectors[0].Enabled || active.Connectors[0].Network != "arrakis-shield-wall" {
-		t.Fatalf("new config did not expose disabled Ixian Proving Ground: %#v", active.Connectors)
-	}
-	for _, connector := range active.Connectors {
-		if connector.Managed && connector.NativeConfig == "" {
-			t.Fatalf("managed extension has no Wormsign native config: %#v", connector)
-		}
+	if len(active.Connectors) != 0 {
+		t.Fatalf("core preset hardcoded an extension: %#v", active.Connectors)
 	}
 	for _, preset := range Presets {
 		profile := ProfileFromPreset(preset, now.Add(time.Second))
-		if len(profile.Connectors) != 1 || profile.Connectors[0].Enabled {
-			t.Fatalf("preset %q implicitly enabled an extension: %#v", preset.ID, profile.Connectors)
+		if len(profile.Connectors) != 0 {
+			t.Fatalf("preset %q hardcoded an extension: %#v", preset.ID, profile.Connectors)
 		}
 	}
-	changed := ProfileFromPreset(Presets[0], now.Add(time.Second))
-	changed.Connectors[0].Enabled = true
+	changed := active.Clone()
+	changed.Connectors = []ConnectorConfig{testManagedExtension()}
 	saved := document.SaveSelection(changed, now.Add(time.Second))
 	if saved.ID == active.ID || len(document.Profiles) != 2 {
 		t.Fatalf("connector toggle was not versioned: %#v", document)
 	}
 }
 
-func TestBundledExtensionMigrationReplacesLegacyExamples(t *testing.T) {
+func TestProfileNormalizationDoesNotInventOrDiscardExtensions(t *testing.T) {
 	profile := ProfileFromPreset(Presets[0], time.Now())
 	profile.Connectors = []ConnectorConfig{
-		{ID: "mobile-lab", Enabled: true},
-		{ID: "runtime-scout", Enabled: true},
-		{ID: "host-check", Enabled: true},
-		{ID: "guild-navigator", Enabled: true},
-		{ID: "third-party", Name: "Third Party", Enabled: true},
+		{ID: "third-party", Name: "Third Party", Enabled: true, Container: "third-party", Network: "network", Endpoint: "http://third-party:7777"},
 	}
 	normalizeProfile(&profile)
-	if len(profile.Connectors) != 2 {
-		t.Fatalf("legacy examples were not replaced cleanly: %#v", profile.Connectors)
-	}
-	if profile.Connectors[0].ID != "third-party" {
+	if len(profile.Connectors) != 1 || profile.Connectors[0].ID != "third-party" {
 		t.Fatalf("third-party extension was not preserved: %#v", profile.Connectors)
-	}
-	if profile.Connectors[1].ID != "ixian-proving-ground" || profile.Connectors[1].Enabled {
-		t.Fatalf("disabled Ixian Proving Ground was not added: %#v", profile.Connectors)
 	}
 }
 
@@ -246,13 +232,14 @@ func TestLegacyRuntimeNamesMigrateToArrakis(t *testing.T) {
 	profile.Name = "Dune Full"
 	profile.Terminal.DockerUser = "dune"
 	profile.Terminal.DockerWorkdir = "/home/dune/projects/example"
+	profile.Connectors = []ConnectorConfig{testManagedExtension()}
 	profile.Connectors[0].Network = "lisan-al-gaib"
 	normalizeProfile(&profile)
 
 	if profile.Name != "Golden Path" || profile.Terminal.DockerUser != "fremen" || profile.Terminal.DockerWorkdir != "/home/fremen/projects/example" {
 		t.Fatalf("legacy runtime identity was not migrated: %#v", profile)
 	}
-	if profile.Connectors[0].Name != "Ixian Proving Ground" || profile.Connectors[0].Network != "arrakis-shield-wall" {
+	if profile.Connectors[0].Network != "arrakis-shield-wall" {
 		t.Fatalf("legacy connector vocabulary was not migrated: %#v", profile.Connectors[0])
 	}
 }
@@ -292,6 +279,7 @@ func TestConfigRejectsUnknownFieldsAndDuplicateIdentities(t *testing.T) {
 func TestConfigRejectsDuplicateExtensionsAndCredentialEndpoints(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	document := DefaultDocument(time.Now())
+	document.Profiles[0].Connectors = []ConnectorConfig{testManagedExtension()}
 	duplicate := document.Profiles[0].Connectors[0]
 	document.Profiles[0].Connectors = append(document.Profiles[0].Connectors, duplicate)
 	if err := Save(path, document); err == nil || !strings.Contains(err.Error(), "duplicate extension") {
@@ -299,13 +287,15 @@ func TestConfigRejectsDuplicateExtensionsAndCredentialEndpoints(t *testing.T) {
 	}
 
 	document = DefaultDocument(time.Now())
+	document.Profiles[0].Connectors = []ConnectorConfig{testManagedExtension()}
 	document.Profiles[0].Connectors[0].Enabled = true
-	document.Profiles[0].Connectors[0].Endpoint = "http://user:placeholder@ixian-proving-ground:7777"
+	document.Profiles[0].Connectors[0].Endpoint = "http://user:placeholder@extension:7777"
 	if err := Save(path, document); err == nil || !strings.Contains(err.Error(), "without credentials") {
 		t.Fatalf("credential-bearing extension URL was accepted: %v", err)
 	}
 
 	document = DefaultDocument(time.Now())
+	document.Profiles[0].Connectors = []ConnectorConfig{testManagedExtension()}
 	document.Profiles[0].Connectors[0].User = "root;unsafe"
 	if err := Save(path, document); err == nil || !strings.Contains(err.Error(), "container user") {
 		t.Fatalf("invalid extension user was accepted: %v", err)
@@ -316,6 +306,7 @@ func TestConfigTextCannotInjectTerminalControls(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	document := DefaultDocument(time.Now())
 	document.Profiles[0].Name = "\x1b[31mDune\x07"
+	document.Profiles[0].Connectors = []ConnectorConfig{testManagedExtension()}
 	document.Profiles[0].Connectors[0].Description = "safe\x1b[2J text"
 	if err := Save(path, document); err != nil {
 		t.Fatal(err)
@@ -327,5 +318,27 @@ func TestConfigTextCannotInjectTerminalControls(t *testing.T) {
 	active, _ := loaded.Active()
 	if strings.ContainsAny(active.Name+active.Connectors[0].Description, "\x1b\x07") {
 		t.Fatalf("terminal control characters survived normalization: %#v", active)
+	}
+}
+
+func TestRemovedDeclarativeExtensionConfigIsOneWayMigrated(t *testing.T) {
+	var connector ConnectorConfig
+	if err := json.Unmarshal([]byte(`{"id":"ixian-proving-ground","native_config":"old/extension.json"}`), &connector); err != nil {
+		t.Fatal(err)
+	}
+	profile := ProfileFromPreset(Presets[0], time.Now())
+	profile.Connectors = []ConnectorConfig{connector}
+	normalizeProfile(&profile)
+	if len(profile.Connectors) != 0 {
+		t.Fatalf("removed declarative extension survived migration: %#v", profile.Connectors)
+	}
+}
+
+func testManagedExtension() ConnectorConfig {
+	return ConnectorConfig{
+		ID: "test-extension", Name: "Test Extension", Managed: true, Bundle: "extensions/test-extension", Version: "3.0.0",
+		Image: "test-extension:3", BuildContext: ".", Dockerfile: "extensions/test-extension/Dockerfile",
+		NativeExecutable: "extensions/test-extension/bin/test", Container: "lisan-test-extension", User: "10001:10001",
+		Network: "arrakis-extension-control", Endpoint: "http://lisan-test-extension:7777",
 	}
 }

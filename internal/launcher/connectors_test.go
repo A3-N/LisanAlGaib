@@ -10,9 +10,9 @@ import (
 )
 
 func TestConnectorRunIsPrivateAndRestricted(t *testing.T) {
-	connector := appconfig.ConnectorConfig{ID: "ixian-proving-ground", Container: "lisan-ixian-proving-ground", User: "10001:10001", Network: "arrakis-shield-wall", Image: "fixture:1", Managed: true}
-	joined := strings.Join(connectorRunArguments(connector), " ")
-	for _, expected := range []string{"--network arrakis-shield-wall", "--user 10001:10001", "--read-only", "--cap-drop ALL", "no-new-privileges", "io.lisanalgaib.connector=ixian-proving-ground", "io.lisanalgaib.connector-config="} {
+	connector := appconfig.ConnectorConfig{ID: "pardot-observatory", Container: "lisan-pardot-observatory", User: "65532:65532", Network: "arrakis-extension-control", Image: "fixture:3", Managed: true, Bundle: "extensions/pardot-observatory"}
+	joined := strings.Join(connectorRunArguments(connector, "/safe/shared"), " ")
+	for _, expected := range []string{"--network arrakis-extension-control", "--user 65532:65532", "--read-only", "--cap-drop ALL", "no-new-privileges", "io.lisanalgaib.connector=pardot-observatory", "io.lisanalgaib.connector-config="} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("connector is missing restriction %q: %s", expected, joined)
 		}
@@ -25,13 +25,28 @@ func TestConnectorRunIsPrivateAndRestricted(t *testing.T) {
 	}
 
 	connector.Tmpfs = []string{"/tmp:rw,nosuid,size=16m"}
-	if configured := strings.Join(connectorRunArguments(connector), " "); !strings.Contains(configured, connector.Tmpfs[0]) {
+	if configured := strings.Join(connectorRunArguments(connector, "/safe/shared"), " "); !strings.Contains(configured, connector.Tmpfs[0]) {
 		t.Fatalf("configured extension tmpfs was not applied: %s", configured)
 	}
 	before := connectorRuntimeSignature(connector)
 	connector.Tmpfs = []string{"/tmp:rw,nosuid,size=32m"}
 	if after := connectorRuntimeSignature(connector); after == before {
 		t.Fatal("runtime-affecting extension change did not alter its container signature")
+	}
+}
+
+func TestConnectorGrantsMapToOnlyRequestedRuntimeAccess(t *testing.T) {
+	connector := appconfig.ConnectorConfig{ID: "extension", Container: "lisan-extension", User: "10001:10001", Network: "control", Image: "fixture:3", Managed: true, Requests: appconfig.ExtensionGrants{Internet: true, PersistentState: true, SharedRead: true, SharedWrite: true}}
+	base := strings.Join(connectorRunArguments(connector, "/safe/shared"), " ")
+	if strings.Contains(base, "/safe/shared") || strings.Contains(base, "/var/lib/lisan-extension") {
+		t.Fatalf("ungranted storage was mounted: %s", base)
+	}
+	connector.Grants = appconfig.ExtensionGrants{PersistentState: true, SharedRead: true}
+	granted := strings.Join(connectorRunArguments(connector, "/safe/shared"), " ")
+	for _, expected := range []string{"/var/lib/lisan-extension", "/safe/shared", "readonly"} {
+		if !strings.Contains(granted, expected) {
+			t.Fatalf("granted runtime omits %q: %s", expected, granted)
+		}
 	}
 }
 

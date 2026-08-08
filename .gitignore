@@ -5,6 +5,7 @@
 /dist/
 /out/
 /internal/runtimebundle/assets/runtime.tar.gz
+/extensions/*/bin/
 /shared/*
 !/shared/.gitkeep
 *.test

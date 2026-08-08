@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "pardot-observatory",
+  "name": "Pardot Observatory",
+  "version": "3.0.0",
+  "icon": "󰆤",
+  "description": "Independent field-survey service demonstrating every protocol v3 extension surface",
+  "docker": {
+    "image": "lisanalgaib/pardot-observatory:3",
+    "context": ".",
+    "dockerfile": "extensions/pardot-observatory/Dockerfile",
+    "container": "lisan-pardot-observatory",
+    "user": "65532:65532",
+    "port": 7777,
+    "tmpfs": [
+      "/run:rw,noexec,nosuid,size=8m"
+    ],
+    "environment": [
+      "PARDOT_REGION=Arrakeen Basin"
+    ]
+  },
+  "native": {
+    "executable": "extensions/pardot-observatory/bin/pardot-observatory_${os}_${arch}",
+    "source_package": "extensions/pardot-observatory/cmd/pardot-observatory"
+  },
+  "requests": {
+    "persistent_state": true,
+    "shared_read": true,
+    "shared_write": true
+  }
+}

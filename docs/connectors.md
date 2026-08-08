@@ -1,116 +1,155 @@
-# Connector protocol v2
+# Extension protocol v3
 
-Connectors keep specialist task logic outside the Lisan binary. The cockpit is
-responsible for lifecycle, discovery, navigation, input selection, and safe
-rendering; the sidecar owns its tools and predefined actions.
+Protocol v3 is a bounded JSON-over-HTTP contract between Lisan and an
+out-of-process extension. Extensions send semantic content only: no ANSI
+escapes, terminal coordinates, styles, executable UI code, or host commands.
 
-## Profile entry
+The client accepts only `http` and `https` endpoints without URL credentials,
+caps JSON responses at 1 MiB, strips terminal controls, validates identifiers
+and limits, and rejects unknown fields or protocol versions.
 
-```json
-{
-  "id": "ixian-proving-ground",
-  "name": "Ixian Proving Ground",
-  "icon": "󰒓",
-  "description": "Disabled reference sidecar exercising every extension protocol v2 TUI capability",
-  "enabled": false,
-  "managed": true,
-  "image": "lisanalgaib/ixian-proving-ground:1",
-  "build_context": ".",
-  "dockerfile": "docker/connectors/ixian-proving-ground/Dockerfile",
-  "native_config": "docker/connectors/ixian-proving-ground/extension.json",
-  "container": "lisan-ixian-proving-ground",
-  "user": "10001:10001",
-  "network": "arrakis-shield-wall",
-  "endpoint": "http://lisan-ixian-proving-ground:7777"
-}
-```
+## Endpoints
 
-For a managed connector, also provide `image`. `build_context` and `dockerfile`
-are optional; when present they must resolve inside Lisan's installed runtime.
-Lisan builds that context only when the enabled connector's image is missing;
-it does not overwrite an existing tag. Bump the configured image tag when a
-connector build changes.
-`native_config` is the mandatory declarative host configuration used by
-`vm`; it must also resolve inside the installed runtime. Wormsign mode
-starts managed extensions on ephemeral loopback ports and cleans them up with
-the TUI. External connectors remain external in both modes.
-Managed containers receive no published ports, run as the profile's explicit
-`user` identity (the bundled default is non-root), and are read-only with dropped capabilities and
-`no-new-privileges`. They are labelled with their connector ID and a runtime
-configuration signature so relevant profile changes recreate stale containers.
-Each profile can configure up to 16 extensions.
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/v3/health` | readiness |
+| `GET` | `/v3/manifest` | identity and advertised surfaces |
+| `GET` | `/v3/views/{view}` | structured view data |
+| `POST` | `/v3/jobs` | start an advertised action |
+| `GET` | `/v3/jobs/{job}` | poll progress and results |
+| `DELETE` | `/v3/jobs/{job}` | request cancellation |
+| `GET` | `/v3/jobs/{job}/artifacts/{artifact}` | download verified artifact |
+| `POST` | `/v3/sessions` | open an advertised session |
+| `POST` | `/v3/sessions/{session}/input` | send bounded session input |
+| `POST` | `/v3/sessions/{session}/resize` | report viewport dimensions |
+| `DELETE` | `/v3/sessions/{session}` | close the session |
 
-An external (`managed: false`) connector must already exist. Lisan connects it
-and `sietch-tabr` to `network` but does not start, stop, rebuild, or remove it.
-
-## Manifest
-
-`GET /v1/manifest` returns:
+## Manifest and views
 
 ```json
 {
-  "protocol_version": 2,
-  "id": "ixian-proving-ground",
-  "name": "Ixian Proving Ground",
-  "icon": "󰒓",
-  "description": "Disabled reference sidecar exercising every extension protocol v2 TUI capability",
-  "ui": {
-    "sidebar": [
-      {"id": "tools", "title": "Sidecar tools", "kind": "tools", "expanded": true},
-      {"id": "actions", "title": "Capability actions", "kind": "actions", "expanded": true}
-    ],
-    "main": [
-      {"id": "summary", "title": "Protocol surface", "kind": "summary"},
-      {"id": "output", "title": "Action result", "kind": "action-output"}
-    ]
-  },
-  "tools": [{
-    "id": "http-client",
-    "name": "curl",
-    "description": "Calls services from the extension network context",
-    "version": "curl 8.x",
-    "ready": true
-  }],
-  "actions": [{
-    "id": "runtime-context",
-    "name": "Runtime Context",
-    "description": "Run an allowlisted command showing the sidecar process and filesystem context"
-  }]
+  "protocol_version": 3,
+  "id": "example",
+  "name": "Example",
+  "version": "3.0.0",
+  "description": "One precise capability",
+  "views": [
+    {"id": "overview", "title": "Overview", "default": true}
+  ],
+  "actions": [
+    {
+      "id": "survey",
+      "name": "Run survey",
+      "inputs": [
+        {"id": "subject", "label": "Subject", "kind": "text", "required": true},
+        {"id": "samples", "label": "Samples", "kind": "number", "default": "5", "min": 1, "max": 20},
+        {"id": "deep", "label": "Deep scan", "kind": "boolean", "default": "false"},
+        {"id": "format", "label": "Format", "kind": "select", "options": [{"value": "md", "label": "Markdown"}]}
+      ]
+    }
+  ],
+  "sessions": [
+    {"id": "console", "name": "Restricted Console"}
+  ]
 }
 ```
 
-The tab itself comes from the profile so it exists even when the service is
-offline. Tools and actions come entirely from the manifest.
-
-## Actions
-
-`POST /v1/run` accepts only an advertised action ID:
-
-```json
-{"action_id":"runtime-context"}
-```
-
-The response is:
+`GET /v3/views/overview` returns blocks in display order:
 
 ```json
 {
-  "action_id": "runtime-context",
-  "output": "IXIAN PROVING GROUND // SIDECAR CONTEXT\n",
-  "exit_code": 0,
-  "duration_ms": 42,
-  "error": ""
+  "id": "overview",
+  "title": "Overview",
+  "updated": "2026-08-08T12:00:00Z",
+  "blocks": [
+    {"id": "health", "kind": "status", "title": "Health", "tone": "success", "text": "Ready"},
+    {"id": "runtime", "kind": "key-value", "title": "Runtime", "fields": [{"label": "Region", "value": "Arrakeen"}]},
+    {"id": "items", "kind": "list", "title": "Findings", "items": [{"label": "Trace", "detail": "stable"}]},
+    {"id": "samples", "kind": "table", "title": "Samples", "columns": [{"id": "id", "title": "ID"}], "rows": [["01"]]},
+    {"id": "scan", "kind": "progress", "title": "Scan", "progress": 40, "detail": "in progress"},
+    {"id": "notes", "kind": "text", "title": "Notes", "text": "Bounded plain text"}
+  ]
 }
 ```
 
-Lisan does not send arbitrary shell commands. Declarative connector actions may
-map IDs to fixed executables and argument arrays, or return fixed `output`
-without spawning a process. An action must choose exactly one implementation.
-Connector authors should set timeouts and output limits, avoid shell
-interpolation, and run as an unprivileged user. Responses are capped at 1 MiB
-by the client and control characters are stripped before display. A manifest
-can advertise at most 32 panels in each area, 100 tools, and 100 actions.
+Supported tones are `neutral`, `info`, `success`, `warning`, and `danger`.
+Tone is a rendering hint, never an instruction or permission.
 
-## Compatibility
+## Jobs and artifacts
 
-The client rejects manifest protocol versions it does not understand. A future
-protocol should add a new version rather than changing v2 semantics in place.
+Start a job with values keyed by the advertised input IDs:
+
+```json
+{"action_id":"survey","inputs":{"subject":"maker traces","samples":"5","deep":"false","format":"md"}}
+```
+
+The service returns `202 Accepted` with a job:
+
+```json
+{
+  "id": "job-000001",
+  "action_id": "survey",
+  "status": "running",
+  "progress": 40,
+  "status_text": "sample 2 of 5",
+  "logs": ["sample 01 stable"]
+}
+```
+
+Statuses are `queued`, `running`, `succeeded`, `failed`, and `cancelled`.
+Terminal jobs may include `result`, `error`, `exit_code`, and artifacts:
+
+```json
+{
+  "id": "survey-report",
+  "name": "survey.md",
+  "media_type": "text/markdown",
+  "size": 1204,
+  "sha256": "64-lowercase-hex-characters"
+}
+```
+
+Lisan downloads at most 32 MiB and requires the exact declared size and SHA-256
+before exporting an artifact. Artifact names are reduced to a base filename.
+
+## Sessions
+
+Open:
+
+```json
+{"session_id":"console","rows":24,"columns":100}
+```
+
+Response:
+
+```json
+{
+  "id": "session-000001",
+  "session_id": "console",
+  "status": "open",
+  "output": "Ready. Type help.\n",
+  "prompt": "example> "
+}
+```
+
+Input uses `{"input":"help\n"}` and resize uses
+`{"rows":30,"columns":120}`. Each response returns the latest bounded session
+state. Status is `open`, `closed`, or `failed`. This transport does not grant a
+shell: the extension decides which input is valid and where it executes.
+
+## Limits
+
+- 32 views and 64 blocks per view
+- 100 actions and 32 inputs per action
+- 16 session types
+- 24 table columns and 1,000 rows
+- 4,000 job log lines and 32 artifacts
+- progress from 0 through 100
+- 1 MiB JSON and 32 MiB artifact bodies
+
+Identifiers use letters, numbers, `.`, `_`, and `-`, beginning with an
+alphanumeric character. IDs are unique within their surface. A manifest must
+contain at least one view and no more than one default view.
+
+Protocol v3 is the only supported extension protocol. There is no v2 adapter,
+declarative host, or fallback endpoint.

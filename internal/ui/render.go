@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"image/color"
 	"os"
-	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -141,13 +140,54 @@ func (m *Model) renderSidebar(t theme.Theme, height int) string {
 		if row.Subtitle != "" && visibleWidth(label)+visibleWidth(row.Subtitle)+2 < sidebarWidth-1 {
 			label += " " + row.Subtitle
 		}
-		style := lipgloss.NewStyle().Width(sidebarWidth - 1).Foreground(lipgloss.Color(t.Text)).Background(lipgloss.Color(t.Surface))
+		foreground, background, bold := sidebarRowPalette(row, t)
+		style := lipgloss.NewStyle().Width(sidebarWidth - 1).
+			Foreground(lipgloss.Color(foreground)).
+			Background(lipgloss.Color(background)).
+			Bold(bold)
 		if index == m.sidebarCursor {
 			style = style.Background(lipgloss.Color(t.Selection)).Foreground(lipgloss.Color(t.Primary)).Bold(m.focusSidebar)
 		}
 		lines = append(lines, style.Render(trimRunes(label, sidebarWidth-3)))
 	}
 	return lipgloss.NewStyle().Width(sidebarWidth).Height(height).BorderRight(true).BorderForeground(lipgloss.Color(t.Border)).Render(strings.Join(lines, "\n"))
+}
+
+// sidebarRowPalette is the core visual contract for every sidebar, including
+// extension-provided controls. Extensions describe semantics; they never need
+// to know about ANSI colors or the active Lisan theme.
+func sidebarRowPalette(row sidebarRow, t theme.Theme) (foreground, background string, bold bool) {
+	foreground, background = t.Text, t.Surface
+	if row.Active {
+		background = t.Panel
+	}
+
+	switch row.Kind {
+	case rowCategory:
+		return t.Secondary, t.Panel, true
+	case rowConnectorView:
+		if row.Active {
+			return t.Primary, background, true
+		}
+		return t.Muted, background, false
+	case rowConnectorAction:
+		if row.Active {
+			return t.Primary, background, true
+		}
+		return t.Text, background, false
+	case rowConnectorSession:
+		if row.Active {
+			return t.Primary, background, true
+		}
+		return t.Text, background, false
+	case rowConnectorArtifact:
+		if row.Active {
+			return t.Success, background, true
+		}
+		return t.Text, background, false
+	default:
+		return foreground, background, bold
+	}
 }
 
 func (m *Model) renderMain(t theme.Theme, width, height int) string {
@@ -170,18 +210,15 @@ func (m *Model) renderMain(t theme.Theme, width, height int) string {
 		case pageTerminal:
 			lines = m.terminalLines()
 		case pageConnector:
-			lines = m.connectorLines()
+			document := m.visibleConnectorDocument(max(width-1, 1), height)
+			lines = make([]string, 0, len(document))
+			for _, line := range document {
+				lines = append(lines, line.Text)
+			}
 		}
 	}
 	if len(lines) == 0 {
 		lines = []string{"", "  Nothing selected."}
-	}
-	if m.page == pageConnector {
-		lines = wrapExtensionLines(lines, max(width-1, 1))
-		m.extensionScrollY = min(max(m.extensionScrollY, 0), max(len(lines)-height, 0))
-		if m.extensionScrollY > 0 {
-			lines = lines[m.extensionScrollY:]
-		}
 	}
 	for len(lines) < height {
 		lines = append(lines, "")
@@ -200,7 +237,77 @@ func (m *Model) renderMain(t theme.Theme, width, height int) string {
 }
 
 func (m *Model) wrappedConnectorLines(width int) []string {
-	return wrapExtensionLines(m.connectorLines(), width)
+	document := wrapExtensionDocument(m.connectorDocument(), width)
+	lines := make([]string, 0, len(document))
+	for _, line := range document {
+		lines = append(lines, line.Text)
+	}
+	return lines
+}
+
+type extensionLine struct {
+	Text         string
+	ControlIndex int
+	Interactive  bool
+}
+
+func extensionTextLines(lines ...string) []extensionLine {
+	result := make([]extensionLine, 0, len(lines))
+	for _, line := range lines {
+		result = append(result, extensionLine{Text: line})
+	}
+	return result
+}
+
+func wrapExtensionDocument(lines []extensionLine, width int) []extensionLine {
+	width = max(width, 1)
+	wrapped := make([]extensionLine, 0, len(lines))
+	for _, line := range lines {
+		for _, part := range strings.Split(ansi.Hardwrap(line.Text, width, true), "\n") {
+			wrapped = append(wrapped, extensionLine{Text: part, ControlIndex: line.ControlIndex, Interactive: line.Interactive})
+		}
+	}
+	return wrapped
+}
+
+func (m *Model) visibleConnectorDocument(width, height int) []extensionLine {
+	document := wrapExtensionDocument(m.connectorDocument(), width)
+	m.extensionScrollY = min(max(m.extensionScrollY, 0), max(len(document)-height, 0))
+	end := min(m.extensionScrollY+height, len(document))
+	return document[m.extensionScrollY:end]
+}
+
+func (m *Model) extensionControlAt(x, y int) (int, bool) {
+	if x < 0 || y < 0 || y >= m.mainContentHeight() {
+		return 0, false
+	}
+	document := m.visibleConnectorDocument(max(m.mainPaneWidth()-1, 1), m.mainContentHeight())
+	if y >= len(document) || !document[y].Interactive {
+		return 0, false
+	}
+	plain := ansi.Strip(document[y].Text)
+	start := visibleWidth(plain) - visibleWidth(strings.TrimLeft(plain, " "))
+	end := visibleWidth(strings.TrimRight(plain, " "))
+	if x < start || x >= end {
+		return 0, false
+	}
+	return document[y].ControlIndex, true
+}
+
+func (m *Model) ensureExtensionControlVisible() {
+	document := wrapExtensionDocument(m.connectorDocument(), max(m.mainPaneWidth()-1, 1))
+	height := m.mainContentHeight()
+	for index, line := range document {
+		if !line.Interactive || line.ControlIndex != m.extensionControlCursor {
+			continue
+		}
+		if index < m.extensionScrollY {
+			m.extensionScrollY = index
+		} else if index >= m.extensionScrollY+height {
+			m.extensionScrollY = index - height + 1
+		}
+		return
+	}
 }
 
 func wrapExtensionLines(lines []string, width int) []string {
@@ -412,75 +519,294 @@ func (m *Model) terminalLines() []string {
 }
 
 func (m *Model) connectorLines() []string {
+	document := m.connectorDocument()
+	lines := make([]string, 0, len(document))
+	for _, line := range document {
+		lines = append(lines, line.Text)
+	}
+	return lines
+}
+
+func (m *Model) connectorDocument() []extensionLine {
 	id := m.selectedConnector
 	state, ok := m.connectorState(id)
 	if !ok {
-		return []string{"", "  EXTENSION // " + id, "", "  Waiting for extension discovery…", "", "  Press R to retry."}
+		return extensionTextLines("", "  EXTENSION // "+id, "", "  Waiting for extension discovery…", "", "  Press R to retry.")
 	}
 	if !state.Online {
-		return []string{
-			"", "  EXTENSION // " + state.Config.Name, "", "  Status       offline",
-			"  Endpoint     " + displayText(state.Config.Endpoint), "  Network      " + displayText(state.Config.Network),
-			"", "  " + displayText(state.Error), "", "  In docker mode the launcher starts enabled managed sidecars.",
-			"  In vm mode managed extensions run natively on loopback.", "  Check native_config and host tooling, then press R to retry.",
-		}
+		return extensionTextLines(
+			"", "  EXTENSION // "+state.Config.Name, "", "  Status       offline",
+			"  Endpoint     "+displayText(state.Config.Endpoint), "  Network      "+displayText(state.Config.Network),
+			"", "  "+displayText(state.Error), "", "  In docker mode the launcher starts enabled managed sidecars.",
+			"  In vm mode managed extensions run natively on loopback.", "  Check the bundle executable and host tooling, then press R to retry.",
+		)
 	}
-	var lines []string
-	for _, panel := range state.Manifest.UI.Main {
-		lines = append(lines, "", "  "+strings.ToUpper(panel.Title), "  "+strings.Repeat("─", min(len([]rune(panel.Title))+8, 42)))
-		switch panel.Kind {
-		case connectorapi.PanelSummary:
-			lines = append(lines, m.extensionSummaryLines(state)...)
-		case connectorapi.PanelActionOutput:
-			lines = append(lines, m.extensionOutputLines(id)...)
+	lines := extensionTextLines(
+		"", "  "+state.Manifest.Icon+"  "+strings.ToUpper(state.Manifest.Name),
+		"  "+state.Manifest.Description,
+		fmt.Sprintf("  v%s · protocol v%d · %d views · %d actions · %d sessions", state.Manifest.Version, state.Manifest.ProtocolVersion, len(state.Manifest.Views), len(state.Manifest.Actions), len(state.Manifest.Sessions)),
+	)
+	if m.selectedArtifact != "" {
+		return append(lines, m.extensionArtifactDocument(id)...)
+	}
+	if m.selectedSession != "" {
+		return append(lines, m.extensionSessionDocument(id)...)
+	}
+	if m.selectedAction != "" {
+		lines = append(lines, m.extensionActionDocument(state)...)
+		for _, line := range m.extensionJobLines(id) {
+			lines = append(lines, extensionLine{Text: line})
+		}
+		return lines
+	}
+	if view, exists := state.Views[m.selectedView]; exists {
+		lines = append(lines, extensionTextLines("", "  "+strings.ToUpper(view.Title), "  "+strings.Repeat("─", min(len([]rune(view.Title))+8, 42)))...)
+		for _, block := range view.Blocks {
+			for _, line := range renderExtensionBlock(block) {
+				lines = append(lines, extensionLine{Text: line})
+			}
 		}
 	}
 	return lines
 }
 
-func (m *Model) extensionSummaryLines(state connectorapi.State) []string {
-	return []string{
-		"", "  " + state.Manifest.Icon + "  " + strings.ToUpper(state.Manifest.Name), "",
-		"  " + state.Manifest.Description, "",
-		"  Status       online",
-		"  Protocol     v" + strconv.Itoa(state.Manifest.ProtocolVersion),
-		"  Endpoint     " + displayText(state.Config.Endpoint),
-		"  Network      " + displayText(state.Config.Network),
-		fmt.Sprintf("  Tools        %d", len(state.Manifest.Tools)),
-		fmt.Sprintf("  Actions      %d", len(state.Manifest.Actions)),
-		"", "  Select an action on the left and press Enter or click it.",
-		"  Output wraps to the pane; Wheel or j/k scrolls vertically.",
+func renderExtensionBlock(block connectorapi.Block) []string {
+	title := block.Title
+	if title == "" {
+		title = block.ID
 	}
-}
-
-func (m *Model) extensionOutputLines(id string) []string {
-	if m.connectorRunning[id] {
-		return []string{"", "  ◌ Running " + m.selectedAction + "…"}
+	marker := map[string]string{connectorapi.ToneInfo: "ℹ", connectorapi.ToneSuccess: "✓", connectorapi.ToneWarning: "!", connectorapi.ToneDanger: "×"}[block.Tone]
+	if marker == "" {
+		marker = "•"
 	}
-	var lines []string
-	if result, exists := m.connectorOutput[id]; exists {
-		lines = append(lines, "", fmt.Sprintf("  LAST ACTION // %s // EXIT %d // %dms", result.ActionID, result.ExitCode, result.DurationMS))
-		if result.Error != "" {
-			lines = append(lines, "  Error: "+result.Error)
+	lines := []string{"", "  " + marker + " " + strings.ToUpper(title)}
+	switch block.Kind {
+	case connectorapi.BlockText, connectorapi.BlockStatus:
+		for _, line := range strings.Split(strings.TrimRight(block.Text, "\n"), "\n") {
+			lines = append(lines, "    "+line)
 		}
-		for _, line := range strings.Split(strings.TrimRight(result.Output, "\n"), "\n") {
-			lines = append(lines, "  │ "+line)
+		if block.Detail != "" {
+			lines = append(lines, "    "+block.Detail)
 		}
+	case connectorapi.BlockKeyValue:
+		for _, field := range block.Fields {
+			lines = append(lines, fmt.Sprintf("    %-18s %s", field.Label, field.Value))
+		}
+	case connectorapi.BlockList:
+		for _, item := range block.Items {
+			line := "    • " + item.Label
+			if item.Detail != "" {
+				line += " · " + item.Detail
+			}
+			lines = append(lines, line)
+		}
+	case connectorapi.BlockTable:
+		var headers []string
+		for _, column := range block.Columns {
+			headers = append(headers, column.Title)
+		}
+		lines = append(lines, "    "+strings.Join(headers, " │ "))
+		lines = append(lines, "    "+strings.Repeat("─", min(len([]rune(strings.Join(headers, " │ "))), 80)))
+		for _, row := range block.Rows {
+			lines = append(lines, "    "+strings.Join(row, " │ "))
+		}
+	case connectorapi.BlockProgress:
+		filled := block.Progress / 5
+		lines = append(lines, fmt.Sprintf("    [%s%s] %d%% %s", strings.Repeat("━", filled), strings.Repeat("─", 20-filled), block.Progress, block.Detail))
 	}
 	return lines
+}
+
+func (m *Model) extensionActionLines(state connectorapi.State) []string {
+	document := m.extensionActionDocument(state)
+	lines := make([]string, 0, len(document))
+	for _, line := range document {
+		lines = append(lines, line.Text)
+	}
+	return lines
+}
+
+func (m *Model) extensionActionDocument(state connectorapi.State) []extensionLine {
+	var action connectorapi.ActionDescriptor
+	for _, candidate := range state.Manifest.Actions {
+		if candidate.ID == m.selectedAction {
+			action = candidate
+			break
+		}
+	}
+	if action.ID == "" {
+		return nil
+	}
+	t := theme.All[m.themeIndex]
+	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(t.Primary))
+	mutedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Muted))
+	lines := extensionTextLines("", sectionStyle.Render("  ACTION // "+strings.ToUpper(action.Name)), "  "+action.Description, "")
+	for index, input := range action.Inputs {
+		value := m.connectorInputValue(state.Config.ID, action.ID, input.ID)
+		if m.extensionInputEdit == action.ID+":"+input.ID {
+			value = m.extensionInputText + "▌"
+		}
+		label, display := connectorInputAffordance(input, value)
+		kind, name := splitInputAffordance(label)
+		kindColor := t.Secondary
+		if input.Kind == connectorapi.InputSelect {
+			kindColor = t.Primary
+		} else if input.Kind == connectorapi.InputBoolean {
+			kindColor = t.Muted
+			if strings.Contains(display, " ON") {
+				kindColor = t.Success
+			}
+		}
+		kindStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(kindColor))
+		focused := !m.focusSidebar && m.extensionControlCursor == index
+		marker := "  "
+		background := t.Panel
+		if focused {
+			marker = "› "
+			background = t.Selection
+		}
+		valueStyle := lipgloss.NewStyle().Bold(focused).Foreground(lipgloss.Color(kindColor)).Background(lipgloss.Color(background))
+		line := "  " + marker + kindStyle.Render(kind) + "  " + name + "  " + valueStyle.Render(" "+display+" ")
+		if input.Description != "" {
+			line += mutedStyle.Render("  ·  " + input.Description)
+		}
+		lines = append(lines, extensionLine{Text: line, ControlIndex: index, Interactive: true})
+	}
+	runIndex := len(action.Inputs)
+	runLabel := " RUN " + strings.ToUpper(action.Name) + " "
+	runForeground, runBackground := t.Background, t.Primary
+	if m.connectorRunning[state.Config.ID] {
+		runLabel = " RUNNING " + strings.ToUpper(action.Name) + " "
+		runForeground, runBackground = t.Muted, t.Panel
+	} else if !m.focusSidebar && m.extensionControlCursor == runIndex {
+		runBackground = t.Success
+	}
+	run := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(runForeground)).Background(lipgloss.Color(runBackground)).Render(runLabel)
+	lines = append(lines,
+		extensionLine{Text: "    " + run, ControlIndex: runIndex, Interactive: true},
+		extensionLine{Text: mutedStyle.Render("    ↑/↓ chooses a control · Enter/Space activates · C cancels a running job")},
+	)
+	return lines
+}
+
+func splitInputAffordance(label string) (kind, name string) {
+	parts := strings.Fields(label)
+	if len(parts) == 0 {
+		return "INPUT", ""
+	}
+	return parts[0], strings.TrimSpace(strings.TrimPrefix(label, parts[0]))
+}
+
+func (m *Model) extensionJobLines(id string) []string {
+	job, exists := m.connectorJobs[id]
+	if !exists {
+		return nil
+	}
+	filled := job.Progress / 5
+	lines := []string{"", fmt.Sprintf("  JOB // %s // %s", strings.ToUpper(job.ActionID), strings.ToUpper(job.Status)), fmt.Sprintf("  [%s%s] %d%% %s", strings.Repeat("━", filled), strings.Repeat("─", 20-filled), job.Progress, job.StatusText)}
+	for _, line := range job.Logs {
+		lines = append(lines, "  │ "+line)
+	}
+	if job.Result != "" {
+		lines = append(lines, "", "  "+job.Result)
+	}
+	if job.Error != "" {
+		lines = append(lines, "  Error: "+job.Error)
+	}
+	if len(job.Artifacts) > 0 {
+		lines = append(lines, fmt.Sprintf("  %d artifact(s) ready in the sidebar", len(job.Artifacts)))
+	}
+	return lines
+}
+
+func (m *Model) extensionSessionDocument(id string) []extensionLine {
+	state, _ := m.connectorState(id)
+	title := m.selectedSession
+	for _, descriptor := range state.Manifest.Sessions {
+		if descriptor.ID == m.selectedSession {
+			title = descriptor.Name
+		}
+	}
+	t := theme.All[m.themeIndex]
+	lines := extensionTextLines("", "  SESSION // "+strings.ToUpper(title))
+	session, exists := m.connectorSessions[id]
+	if !exists || session.SessionID != m.selectedSession {
+		buttonBackground := t.Primary
+		if !m.focusSidebar && m.extensionControlCursor == 0 {
+			buttonBackground = t.Success
+		}
+		button := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(t.Background)).Background(lipgloss.Color(buttonBackground)).Render(" OPEN " + strings.ToUpper(title) + " ")
+		return append(lines,
+			extensionLine{Text: "", Interactive: false},
+			extensionLine{Text: "    " + button, ControlIndex: 0, Interactive: true},
+			extensionLine{Text: "    Enter/Space opens this extension-owned session."},
+		)
+	}
+	focusBackground := t.Primary
+	if !m.focusSidebar && m.extensionControlCursor == 0 {
+		focusBackground = t.Success
+	}
+	focus := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(t.Background)).Background(lipgloss.Color(focusBackground)).Render(" FOCUS INPUT ")
+	lines = append(lines,
+		extensionLine{Text: ""},
+		extensionLine{Text: "    " + focus, ControlIndex: 0, Interactive: true},
+	)
+	for _, line := range strings.Split(strings.TrimRight(session.Output, "\n"), "\n") {
+		lines = append(lines, extensionLine{Text: "  " + line})
+	}
+	prompt := session.Prompt
+	if prompt == "" {
+		prompt = "> "
+	}
+	cursor := ""
+	if m.extensionSessionCapture {
+		cursor = "▌"
+	}
+	lines = append(lines, extensionTextLines("", "  "+prompt+m.extensionSessionInput+cursor, "", "  Enter sends a line · Ctrl-G returns to wrapper controls")...)
+	return lines
+}
+
+func (m *Model) extensionArtifactDocument(id string) []extensionLine {
+	job := m.connectorJobs[id]
+	var selected connectorapi.Artifact
+	for _, artifact := range job.Artifacts {
+		if artifact.ID == m.selectedArtifact {
+			selected = artifact
+			break
+		}
+	}
+	if selected.ID == "" {
+		return extensionTextLines("", "  ARTIFACT // NOT FOUND")
+	}
+	t := theme.All[m.themeIndex]
+	background := t.Success
+	if m.focusSidebar {
+		background = t.Primary
+	}
+	button := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(t.Background)).Background(lipgloss.Color(background)).Render(" SAVE TO SHARED ")
+	return []extensionLine{
+		{Text: ""},
+		{Text: "  ARTIFACT // " + strings.ToUpper(selected.Name)},
+		{Text: "  Size        " + fmt.Sprintf("%d B", selected.Size)},
+		{Text: "  Media type  " + emptyDash(selected.MediaType)},
+		{Text: "  SHA-256     " + emptyDash(selected.SHA256)},
+		{Text: ""},
+		{Text: "    " + button, ControlIndex: 0, Interactive: true},
+		{Text: "    Enter/Space exports this artifact into the shared directory."},
+	}
 }
 
 func (m *Model) helpLines() []string {
 	return []string{
 		"", "  HELP // KEYBOARD & MOUSE", "  " + strings.Repeat("━", 40), "",
-		"  Mouse        click the top bar, sidebar items, or an embedded pane",
+		"  Mouse        click navigation, sidebar items, main controls, or embedded panes",
 		"  Re-click     collapse/restore the active sidebar; Extensions toggles its menu",
 		"  Wheel        vertically scroll Terminal history, extensions, or the sidebar",
 		"  Tab/S-Tab    next/previous top-level page (wrapper mode)",
 		"  Ctrl-G       toggle input between embedded app and wrapper",
 		"  Ctrl-B       collapse/expand sidebar",
 		"  h / l        focus sidebar / main pane",
-		"  j / k        move or vertically scroll",
+		"  j / k        move, select an extension control, or vertically scroll",
 		"  g / G        first/top or last/bottom; PgUp/PgDn scroll a page",
 		"  Enter/Space  expand a category or activate the selected item",
 		"  F2           cycle colour theme",

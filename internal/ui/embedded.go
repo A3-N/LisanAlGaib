@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"encoding/hex"
 	"fmt"
 	"image/color"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -17,6 +19,7 @@ import (
 	"github.com/charmbracelet/x/vt"
 
 	"lisanalgaib/internal/appconfig"
+	connectorapi "lisanalgaib/internal/connectors"
 	"lisanalgaib/internal/files"
 	"lisanalgaib/internal/nvimconfig"
 	terminalhost "lisanalgaib/internal/terminal"
@@ -644,6 +647,14 @@ func (m *Model) sessionStarting() bool {
 }
 
 func (m *Model) Close() {
+	for connectorID, session := range m.connectorSessions {
+		if session.Status != "open" {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_, _ = connectorapi.CloseSession(ctx, m.connectorEndpoint(connectorID), session.ID)
+		cancel()
+	}
 	if m.cancel != nil {
 		m.cancel()
 	}

@@ -261,7 +261,7 @@ func TestDockerfilePinsEveryAgentPayloadWithoutManifestTooling(t *testing.T) {
 }
 
 func TestConnectorDockerfileCopiesOnlyItsDependencyPackages(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "docker", "connectors", "ixian-proving-ground", "Dockerfile"))
+	data, err := os.ReadFile(filepath.Join("..", "..", "extensions", "pardot-observatory", "Dockerfile"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,13 +269,13 @@ func TestConnectorDockerfileCopiesOnlyItsDependencyPackages(t *testing.T) {
 	if strings.Contains(dockerfile, "COPY internal ./internal") {
 		t.Fatal("connector build copies every application package")
 	}
-	for _, dependency := range []string{"appconfig", "childproc", "connectors", "extensionhost", "lifecycle", "safefile", "textsafe"} {
+	for _, dependency := range []string{"appconfig", "connectors", "extensionhost", "safefile", "textsafe"} {
 		if !strings.Contains(dockerfile, "COPY internal/"+dependency+" ./internal/"+dependency) {
 			t.Fatalf("connector build omits dependency package %s", dependency)
 		}
 	}
-	if !strings.Contains(dockerfile, "COPY --chmod=0555 docker/connectors/ixian-proving-ground/ixian-showcase /usr/local/bin/ixian-showcase") {
-		t.Fatal("reference extension does not install its allowlisted dispatcher as read-only executable content")
+	if !strings.Contains(dockerfile, `ENTRYPOINT ["/pardot-observatory"`) {
+		t.Fatal("reference extension does not run its independent service executable")
 	}
 }
 

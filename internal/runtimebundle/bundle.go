@@ -15,7 +15,7 @@ import (
 
 const archivePath = "assets/runtime.tar.gz"
 
-var sourceRoots = []string{".dockerignore", "Dockerfile", "compose.yaml", "go.mod", "go.sum", "cmd", "internal", "docker"}
+var sourceRoots = []string{".dockerignore", "Dockerfile", "compose.yaml", "go.mod", "go.sum", "cmd", "internal", "docker", "extensions"}
 
 // assets contains the generated release runtime when scripts/build-release is
 // used. Source and container builds retain only the placeholder and fall back
@@ -45,6 +45,9 @@ func IncludeSource(relative string, directory bool) bool {
 		return false
 	}
 	if relative == "internal/runtimebundle/assets/runtime.tar.gz" {
+		return false
+	}
+	if strings.HasPrefix(relative, "internal/runtimebundle/assets/.runtime-") && strings.HasSuffix(relative, ".tar.gz") {
 		return false
 	}
 	if !directory && (strings.HasSuffix(relative, "_test.go") || strings.HasSuffix(relative, "_windows.go")) {

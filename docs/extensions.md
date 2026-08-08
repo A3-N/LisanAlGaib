@@ -1,189 +1,164 @@
-# Building a Lisan extension
+# Building an extension
 
-An extension is an independent service that implements Lisan's versioned HTTP
-protocol. Keep its feature logic, dependencies, tests, image, and assets inside
-its own directory. Lisan should only provide generic lifecycle and rendering
-support; change the core only when the shared protocol cannot express a real
-extension requirement.
+An extension is an out-of-process service. It owns its domain logic,
+dependencies, image, jobs, state, artifacts, and restricted command surfaces.
+Lisan discovers a small lifecycle bundle, talks protocol v3 over HTTP, and
+renders semantic data. It never imports extension code or switches on an
+extension ID.
 
-`docker/connectors/ixian-proving-ground` is the bundled protocol reference. It
-is disabled by default in every preset, so it is neither built nor started
-until the user enables it. The fixture deliberately exercises every protocol
-v2 panel, tool, action, result, failure, wrapping, and scrolling path.
+Use [`extensions/pardot-observatory`](../extensions/pardot-observatory) as the
+working reference. It is disabled by default and demonstrates structured
+views, every input type, asynchronous jobs, cancellation, logs, checksummed
+artifacts, optional state/shared grants, and an extension-owned console.
 
-## Choose an implementation
+## Directory contract
 
-There are two supported approaches:
+Create one directory beneath `extensions/`:
 
-1. **Declarative:** provide an `extension.json` and run Lisan's generic
-   `extension-host`. This is the most portable option and is also the only
-   managed extension form currently hosted natively by `lisan vm`.
-2. **Independent service:** implement the three HTTP endpoints in any language
-   or framework. This works as a Docker extension. Use `managed: true` when
-   Lisan owns the image/container, or `managed: false` when another system owns
-   an already-running container.
-
-Do not add extension-specific packages, IDs, panels, or commands to the Lisan
-binary. A new generic protocol capability belongs in the core only when an
-extension cannot otherwise work correctly in a supported runtime.
-
-## Declarative extension
-
-Create `docker/connectors/<id>/extension.json`:
-
-```json
-{
-  "manifest": {
-    "protocol_version": 2,
-    "id": "example",
-    "name": "Example",
-    "description": "One precise feature",
-    "ui": {
-      "sidebar": [
-        {"id": "actions", "title": "Actions", "kind": "actions", "expanded": true}
-      ],
-      "main": [
-        {"id": "summary", "title": "Example", "kind": "summary"},
-        {"id": "output", "title": "Result", "kind": "action-output"}
-      ]
-    }
-  },
-  "actions": [
-    {
-      "id": "guide",
-      "name": "Show guide",
-      "description": "Return portable content without a child process",
-      "output": "Hello from the extension.\n"
-    },
-    {
-      "id": "inspect",
-      "name": "Inspect",
-      "description": "Run one fixed executable and argument list",
-      "command": "uname",
-      "args": ["-a"]
-    }
-  ]
-}
+```text
+extensions/example/
+├── bundle.json
+├── Dockerfile
+└── cmd/example/...
 ```
 
-An action requires exactly one of:
-
-- `output`: fixed, cross-platform text returned directly by the generic host.
-- `command` plus optional `args`: one executable launched without a shell.
-
-Tools use `command` plus optional `version_args`. The generic host locates the
-executable and reports readiness/version in the manifest. Commands and actions
-are fixed by the extension; protocol v2 never accepts shell text or arbitrary
-arguments from the TUI.
-
-### Extension-owned command surfaces
-
-An extension is allowed to run a shell when the shell and every argument are
-chosen by the extension. For example, a mobile extension may ship a small
-dispatcher whose `devices`, `install`, and `logs` subcommands invoke only the
-approved `adb` operations. Declarative actions can call that dispatcher
-directly, or call an extension-local shell with a fixed script:
+Discovery reads every immediate `extensions/*/bundle.json`. Adding or removing
+a valid directory is sufficient; no core registry needs editing.
 
 ```json
 {
-  "id": "devices",
-  "name": "Connected devices",
-  "command": "/bin/sh",
-  "args": ["-c", "exec adb devices -l"]
-}
-```
-
-In Docker mode that process runs in the extension container, not Lisan's main
-terminal. In `vm` mode a declarative command is a separate child process on the
-host: its aliases, working directory, and shell state cannot mutate Lisan's
-terminal session, but its filesystem and network side effects are still real.
-Never concatenate user text into `sh -c`; prefer a compiled dispatcher or
-script that implements an explicit command allowlist and aliases higher-level
-operations to fixed argument arrays.
-
-Protocol v2 actions are one-shot and return captured output. They are not an
-interactive PTY. When a real extension needs an interactive console, add a new
-versioned, generic streaming/input contract: the restricted REPL or PTY stays
-inside the extension, validates commands server-side, and Lisan transports
-only input, output, resize, and close events. Do not attach it to the main
-terminal session or grant the workspace container a Docker socket merely to
-implement the console.
-
-Use a multi-stage Dockerfile like Ixian Proving Ground's: compile only
-`cmd/extension-host` and the packages it imports, copy the extension JSON, run
-as a numeric non-root user, and expose port `7777`. Give the image a new tag
-whenever its contents change; Lisan deliberately reuses an existing image tag.
-
-## Register it
-
-Add a connector object to a profile's `connectors` array:
-
-```json
-{
+  "schema_version": 1,
   "id": "example",
   "name": "Example",
-  "description": "One precise feature",
-  "enabled": false,
-  "managed": true,
-  "image": "yourname/lisan-example:1",
-  "build_context": ".",
-  "dockerfile": "docker/connectors/example/Dockerfile",
-  "native_config": "docker/connectors/example/extension.json",
-  "container": "lisan-example",
-  "user": "10001:10001",
-  "network": "arrakis-shield-wall",
-  "endpoint": "http://lisan-example:7777"
+  "version": "3.0.0",
+  "description": "One precise capability",
+  "docker": {
+    "image": "yourname/lisan-example:3",
+    "context": ".",
+    "dockerfile": "extensions/example/Dockerfile",
+    "container": "lisan-example",
+    "user": "10001:10001",
+    "port": 7777,
+    "tmpfs": ["/run:rw,noexec,nosuid,size=8m"],
+    "environment": ["EXAMPLE_MODE=field"]
+  },
+  "native": {
+    "executable": "extensions/example/bin/example_${os}_${arch}",
+    "source_package": "extensions/example/cmd/example"
+  },
+  "requests": {
+    "persistent_state": true,
+    "shared_read": true,
+    "shared_write": false,
+    "internet": false
+  }
 }
 ```
 
-Keep it disabled initially. The config TUI can then toggle it like any other
-extension. Paths must resolve inside Lisan's installed runtime; IDs, container
-names, and network names must be Docker-safe and unique.
+All paths are runtime-relative and cannot escape the installed bundle. `${os}`
+and `${arch}` resolve from the Lisan binary target. `scripts/build-release`
+discovers source packages and embeds the matching native extension executable
+in each Linux, macOS, and Windows release, so release users do not need Go.
+During source development, `lisan vm` builds a missing native executable in a
+temporary directory.
 
-## What Lisan does
+An already-hosted service can instead use an external-only bundle:
 
-For an enabled managed Docker extension, Lisan:
+```json
+{
+  "schema_version": 1,
+  "id": "hosted-example",
+  "name": "Hosted Example",
+  "version": "3.0.0",
+  "external": {"endpoint": "https://extension.example.test"}
+}
+```
 
-- builds the image only when the configured tag is missing;
-- creates/connects the configured Docker network;
-- starts a labelled, read-only container as the configured user;
-- drops all capabilities, sets `no-new-privileges`, and supplies only a small
-  `/tmp` tmpfs;
-- polls the manifest and renders only the panels it advertises;
-- stops owned containers when the extension is disabled and removes owned
-  state during cleanup.
+That endpoint must be reachable from the selected runtime. Lisan discovers and
+renders it but does not build, start, stop, or remove it.
 
-For `lisan vm`, Lisan reads `native_config`, starts the generic host on an
-ephemeral loopback address, and keeps that address in memory for the current
-run. It does not persist the loopback endpoint over the Docker endpoint.
+## Runtimes and grants
 
-The main TUI supports these protocol v2 modules:
+All extensions begin disabled. Enabling an extension and granting its requested
+capabilities are separate config choices. A bundle cannot receive a capability
+it did not request.
 
-| Area | Kind | Data source |
+Docker-managed extensions receive:
+
+- a read-only root filesystem, dropped Linux capabilities, and
+  `no-new-privileges`;
+- a non-root identity chosen by the bundle;
+- `/tmp` plus declared bounded tmpfs mounts;
+- a private internal control network used only for protocol traffic.
+
+Optional grants add exactly these resources:
+
+| Grant | Docker effect | Environment |
 | --- | --- | --- |
-| Sidebar | `tools` | manifest `tools` |
-| Sidebar | `actions` | manifest `actions` |
-| Main | `summary` | extension identity and counts |
-| Main | `action-output` | the most recent run response, wrapped to the pane with vertical scrolling |
+| `internet` | Attach to an extension-specific outbound egress network | none |
+| `persistent_state` | Managed volume at `/var/lib/lisan-extension` | `LISAN_EXTENSION_STATE` |
+| `shared_read` | Read-only shared bind mount at `/shared` | `LISAN_EXTENSION_SHARED` |
+| `shared_write` | Make the shared mount writable; implies read | `LISAN_EXTENSION_SHARED` |
 
-The service contract is:
+The control protocol never needs a published host port, workspace mount,
+Docker socket, device, secret, or host home directory.
 
-- `GET /v1/health` for readiness.
-- `GET /v1/manifest` for identity, UI modules, tools, and actions.
-- `POST /v1/run` with `{"action_id":"..."}` for an advertised action.
+`vm` launches the platform-native executable on an ephemeral loopback port and
+stops it with Lisan. It passes granted state/shared paths, but Wormsign is an
+unsandboxed host-user mode: those path hints are organization, not a security
+boundary. Use Docker for hostile extension code.
 
-See [connectors.md](connectors.md) for the exact wire examples and limits.
+`lisan cleanup` removes managed extension containers, images, state volumes,
+and the private control network. It preserves the host shared directory.
 
-## Current boundaries
+## Implement the service
 
-Docker extensions receive networking, not workspace mounts, Docker socket
-access, secrets, or arbitrary environment injection. Protocol v2 actions have
-no user-input form. Native managed extensions use the declarative host rather
-than launching an extension-specific native executable. If an extension truly
-needs one of those capabilities, document the use case and extend the generic
-profile/protocol/runtime contract instead of special-casing that extension.
+Implement the HTTP contract in [connectors.md](connectors.md) using any
+language. Go extensions may use `internal/extensionhost.Handler` as an adapter,
+but it is optional; the wire format is the compatibility boundary.
 
-Test the extension config with `go test ./internal/extensionhost` and then run
-the full suite with `go test ./...`. Test Docker mode with the extension both
-disabled and explicitly enabled; also test `vm` when `native_config` is
-provided.
+The service advertises:
+
+- semantic views made of text, status, key/value, list, table, and progress
+  blocks;
+- typed actions with text, number, boolean, and select inputs;
+- asynchronous jobs with progress, logs, cancellation, results, and artifacts;
+- named sessions that accept input and return bounded output.
+
+Lisan owns navigation, wrapping, scrolling, themes, input editing, polling,
+artifact checksum verification, and export to the shared directory. The
+extension owns validation and every side effect.
+
+The core also owns control affordances. The sidebar only selects a view,
+action, session, or artifact; only category rows use collapse arrows. The main
+pane renders manifest inputs as clickable, themed `TEXT`, `NUMBER`, `SELECT`,
+and `TOGGLE` fields, followed by a dedicated `RUN` button. Sessions and
+artifacts receive dedicated `OPEN` and `SAVE` buttons there as well. Extension
+authors should supply semantic types and labels, not ANSI styling,
+terminal-specific symbols, or hit-testing logic.
+
+An extension session may feel like a shell, but the extension must define its
+boundary. A mobile extension could accept `devices`, `install`, and `logs`, then
+map those commands to fixed `adb` argument arrays inside its own process or
+container. Do not expose an arbitrary shell merely because the transport can
+carry text. Pardot Observatory's field console is the reference restricted
+REPL.
+
+## When the core should change
+
+Do not add extension names, commands, view layouts, or dependencies to Lisan.
+Change the core only when an independent extension cannot express a generally
+useful capability through the existing lifecycle, grant, or protocol model.
+Add the generic capability to the versioned contract, renderer, both runtime
+paths, tests, and this guide; keep the domain implementation in the extension.
+
+Before publishing an extension:
+
+```bash
+go test ./...
+go test -race ./...
+go vet ./...
+```
+
+Test it disabled, enabled without grants, enabled with each requested grant,
+under Docker, and as a native process on every platform you ship.

@@ -8,16 +8,25 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
 	"time"
 
+	"lisanalgaib/internal/extensionbundle"
 	"lisanalgaib/internal/runtimebundle"
 )
 
 func main() {
+	if len(os.Args) == 5 && (os.Args[1] == "prepare" || os.Args[1] == "clean") {
+		if err := manageNativeExtensions(os.Args[1], os.Args[2], os.Args[3], os.Args[4]); err != nil {
+			fmt.Fprintln(os.Stderr, "lisan-runtime-pack:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) != 3 {
 		fmt.Fprintln(os.Stderr, "usage: lisan-runtime-pack ROOT OUTPUT")
 		os.Exit(2)
@@ -26,6 +35,39 @@ func main() {
 		fmt.Fprintln(os.Stderr, "lisan-runtime-pack:", err)
 		os.Exit(1)
 	}
+}
+
+func manageNativeExtensions(action, root, goos, goarch string) error {
+	bundles, err := extensionbundle.Discover(root)
+	if err != nil {
+		return err
+	}
+	for _, bundle := range bundles {
+		if bundle.Native.SourcePackage == "" {
+			continue
+		}
+		relative := strings.ReplaceAll(bundle.Native.Executable, "${os}", goos)
+		relative = strings.ReplaceAll(relative, "${arch}", goarch)
+		output := filepath.Join(root, filepath.FromSlash(relative))
+		if action == "clean" {
+			if err := os.Remove(output); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			_ = os.Remove(filepath.Dir(output))
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
+			return err
+		}
+		packagePath := "./" + strings.TrimPrefix(filepath.ToSlash(bundle.Native.SourcePackage), "./")
+		command := exec.Command("go", "build", "-trimpath", "-buildvcs=false", "-ldflags=-s -w -buildid=", "-o", output, packagePath)
+		command.Dir = root
+		command.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS="+goos, "GOARCH="+goarch)
+		if output, err := command.CombinedOutput(); err != nil {
+			return fmt.Errorf("build native extension %s: %w: %s", bundle.ID, err, strings.TrimSpace(string(output)))
+		}
+	}
+	return nil
 }
 
 func pack(root, output string) error {

@@ -136,6 +136,61 @@ func Cleanup(ctx context.Context, options CleanupOptions) error {
 			cliout.Detail(stdout, "removed", "Docker network "+workspaceNetwork)
 		}
 	}
+	if dockerObjectExists(ctx, "network", extensionControlNetwork) && dockerNetworkOwned(ctx, extensionControlNetwork) {
+		attached, attachedErr := dockerOutput(ctx, "network", "inspect", "--format", `{{range .Containers}}{{.Name}} {{end}}`, extensionControlNetwork)
+		if attachedErr != nil {
+			result = errors.Join(result, fmt.Errorf("list extension control network attachments: %w", attachedErr))
+		} else {
+			for _, name := range strings.Fields(attached) {
+				if dockerName.MatchString(name) {
+					if err := runDocker(ctx, stdout, stderr, "network", "disconnect", "--force", extensionControlNetwork, name); err != nil {
+						result = errors.Join(result, fmt.Errorf("disconnect %s from extension control network: %w", name, err))
+					}
+				}
+			}
+		}
+		if err := runDocker(ctx, stdout, stderr, "network", "rm", extensionControlNetwork); err != nil {
+			result = errors.Join(result, fmt.Errorf("remove extension control network: %w", err))
+		} else {
+			cliout.Detail(stdout, "removed", "extension control network "+extensionControlNetwork)
+		}
+	}
+	egressNetworks, egressErr := dockerOutput(ctx, "network", "ls", "--filter", "label=io.lisanalgaib.extension-egress", "--format", `{{.Name}}`)
+	if egressErr != nil {
+		result = errors.Join(result, fmt.Errorf("list extension egress networks: %w", egressErr))
+	} else {
+		for _, name := range strings.Fields(egressNetworks) {
+			if !dockerName.MatchString(name) || !dockerExtensionEgressOwned(ctx, name) {
+				continue
+			}
+			attached, _ := dockerOutput(ctx, "network", "inspect", "--format", `{{range .Containers}}{{.Name}} {{end}}`, name)
+			for _, container := range strings.Fields(attached) {
+				if dockerName.MatchString(container) {
+					_ = runDocker(ctx, stdout, stderr, "network", "disconnect", "--force", name, container)
+				}
+			}
+			if err := runDocker(ctx, stdout, stderr, "network", "rm", name); err != nil {
+				result = errors.Join(result, fmt.Errorf("remove extension egress network %s: %w", name, err))
+			} else {
+				cliout.Detail(stdout, "removed", "extension egress network "+name)
+			}
+		}
+	}
+	extensionVolumes, volumeErr := dockerOutput(ctx, "volume", "ls", "--filter", "label=io.lisanalgaib.extension-volume", "--format", `{{.Name}}`)
+	if volumeErr != nil {
+		result = errors.Join(result, fmt.Errorf("list extension state volumes: %w", volumeErr))
+	} else {
+		for _, name := range strings.Fields(extensionVolumes) {
+			if !dockerName.MatchString(name) || !dockerExtensionVolumeOwned(ctx, name) {
+				continue
+			}
+			if err := runDocker(ctx, stdout, stderr, "volume", "rm", name); err != nil {
+				result = errors.Join(result, fmt.Errorf("remove extension state volume %s: %w", name, err))
+			} else {
+				cliout.Detail(stdout, "removed", "extension state volume "+name)
+			}
+		}
+	}
 	if dockerObjectExists(ctx, "volume", workspaceVolume) && dockerVolumeOwned(ctx, workspaceVolume) {
 		if err := runDocker(ctx, stdout, stderr, "volume", "rm", workspaceVolume); err != nil {
 			result = errors.Join(result, fmt.Errorf("remove Docker home volume: %w", err))
@@ -194,6 +249,18 @@ func dockerNetworkOwned(ctx context.Context, name string) bool {
 func dockerVolumeOwned(ctx context.Context, name string) bool {
 	labels, err := dockerOutput(ctx, "volume", "inspect", "--format", `{{index .Labels "io.lisanalgaib.volume"}}|{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.volume"}}`, name)
 	return err == nil && composeResourceOwned(labels, "usul")
+}
+
+func dockerExtensionVolumeOwned(ctx context.Context, name string) bool {
+	label, err := dockerOutput(ctx, "volume", "inspect", "--format", `{{index .Labels "io.lisanalgaib.extension-volume"}}`, name)
+	id := strings.TrimSpace(label)
+	return err == nil && dockerName.MatchString(id) && name == extensionVolumeName(id)
+}
+
+func dockerExtensionEgressOwned(ctx context.Context, name string) bool {
+	label, err := dockerOutput(ctx, "network", "inspect", "--format", `{{index .Labels "io.lisanalgaib.extension-egress"}}`, name)
+	id := strings.TrimSpace(label)
+	return err == nil && dockerName.MatchString(id) && name == extensionEgressNetwork(id)
 }
 
 func composeResourceOwned(labels, composeResource string) bool {

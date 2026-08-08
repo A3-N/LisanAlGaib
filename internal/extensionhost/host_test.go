@@ -3,165 +3,125 @@ package extensionhost
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
-	"time"
 
 	"lisanalgaib/internal/connectors"
 )
 
-func TestBundledIxianProvingGroundExercisesProtocolV2(t *testing.T) {
-	path := filepath.Join("..", "..", "docker", "connectors", "ixian-proving-ground", "extension.json")
-	config, err := LoadConfig(path)
-	if err != nil {
-		t.Fatal(err)
+func TestProtocolV3HandlerExposesEverySurface(t *testing.T) {
+	backend := &testBackend{}
+	handler := Handler(backend)
+	requests := []struct {
+		method string
+		path   string
+		body   string
+		status int
+	}{
+		{http.MethodGet, "/v3/health", "", http.StatusOK},
+		{http.MethodGet, "/v3/manifest", "", http.StatusOK},
+		{http.MethodGet, "/v3/views/overview", "", http.StatusOK},
+		{http.MethodPost, "/v3/jobs", `{"action_id":"survey"}`, http.StatusAccepted},
+		{http.MethodGet, "/v3/jobs/job-1", "", http.StatusOK},
+		{http.MethodDelete, "/v3/jobs/job-1", "", http.StatusOK},
+		{http.MethodGet, "/v3/jobs/job-1/artifacts/report", "", http.StatusOK},
+		{http.MethodPost, "/v3/sessions", `{"session_id":"console","rows":20,"columns":80}`, http.StatusOK},
+		{http.MethodPost, "/v3/sessions/session-1/input", `{"input":"help\\n"}`, http.StatusOK},
+		{http.MethodPost, "/v3/sessions/session-1/resize", `{"rows":30,"columns":100}`, http.StatusOK},
+		{http.MethodDelete, "/v3/sessions/session-1", "", http.StatusOK},
 	}
-	if config.Manifest.ID != "ixian-proving-ground" || len(config.Manifest.UI.Sidebar) != 2 || len(config.Manifest.UI.Main) != 2 {
-		t.Fatalf("unexpected Ixian Proving Ground config: %#v", config.Manifest)
-	}
-	if config.Manifest.UI.Sidebar[0].Kind != connectors.PanelTools || config.Manifest.UI.Sidebar[1].Kind != connectors.PanelActions {
-		t.Fatalf("showcase does not expose both sidebar capabilities: %#v", config.Manifest.UI.Sidebar)
-	}
-	if config.Manifest.UI.Main[0].Kind != connectors.PanelSummary || config.Manifest.UI.Main[1].Kind != connectors.PanelActionOutput {
-		t.Fatalf("showcase does not expose both main capabilities: %#v", config.Manifest.UI.Main)
-	}
-	if len(config.Tools) != 3 || len(config.Actions) != 5 {
-		t.Fatalf("showcase surface = %d tools/%d actions, want 3/5", len(config.Tools), len(config.Actions))
-	}
-	static, commands := 0, 0
-	for _, action := range config.Actions {
-		if action.Output != "" {
-			static++
+	for _, test := range requests {
+		request := httptest.NewRequest(test.method, test.path, bytes.NewBufferString(test.body))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != test.status {
+			t.Errorf("%s %s returned %d: %s", test.method, test.path, response.Code, response.Body.String())
 		}
-		if action.Command != "" {
-			commands++
+	}
+}
+
+func TestProtocolV3HandlerIsStrictAndBounded(t *testing.T) {
+	handler := Handler(&testBackend{})
+	for _, body := range []string{`{"action_id":"survey","unknown":true}`, `{"action_id":"survey"} {}`} {
+		request := httptest.NewRequest(http.MethodPost, "/v3/jobs", bytes.NewBufferString(body))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("invalid request returned %d", response.Code)
 		}
 	}
-	if static != 1 || commands != 4 {
-		t.Fatalf("showcase does not cover static and command actions: static=%d command=%d", static, commands)
-	}
-}
-
-func TestExtensionConfigIsMandatoryAndStrict(t *testing.T) {
-	if _, err := LoadConfig(filepath.Join(t.TempDir(), "missing.json")); err == nil {
-		t.Fatal("missing mandatory extension config was accepted")
-	}
-	path := writeConfig(t, testConfiguration())
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, append(data, []byte("{}")...), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "multiple JSON") {
-		t.Fatalf("multiple extension config values were accepted: %v", err)
-	}
-}
-
-func TestExtensionConfigSizeLimitCannotHideTrailingData(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "extension.json")
-	data := append([]byte(`{"manifest":{}}`), bytes.Repeat([]byte(" "), 1<<20)...)
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "exceeds") {
-		t.Fatalf("oversized extension config was accepted: %v", err)
-	}
-}
-
-func TestRunEndpointAcceptsOnlyAdvertisedActions(t *testing.T) {
-	config := testConfiguration()
-	request := httptest.NewRequest(http.MethodPost, "/v1/run", bytes.NewBufferString(`{"action_id":"unknown"}`))
+	request := httptest.NewRequest(http.MethodGet, "/v3/views/missing", nil)
 	response := httptest.NewRecorder()
-	handler(config).ServeHTTP(response, request)
+	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusNotFound {
-		t.Fatalf("unknown action returned %d", response.Code)
-	}
-
-	request = httptest.NewRequest(http.MethodPost, "/v1/run", bytes.NewBufferString(`{"action_id":"check"} {}`))
-	response = httptest.NewRecorder()
-	handler(config).ServeHTTP(response, request)
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("ambiguous action request returned %d", response.Code)
+		t.Fatalf("missing backend value returned %d", response.Code)
 	}
 }
 
-func TestStaticActionReturnsConfiguredOutputWithoutAProcess(t *testing.T) {
-	config := testConfiguration()
-	config.Actions[0].Command = ""
-	config.Actions[0].Output = "portable guide\n"
-	request := httptest.NewRequest(http.MethodPost, "/v1/run", bytes.NewBufferString(`{"action_id":"check"}`))
+func TestProtocolV3HandlerRejectsInvalidBackendData(t *testing.T) {
+	backend := &testBackend{invalidManifest: true}
 	response := httptest.NewRecorder()
-	handler(config).ServeHTTP(response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("static action returned %d", response.Code)
-	}
-	var result connectors.RunResponse
-	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
-		t.Fatal(err)
-	}
-	if result.Output != "portable guide\n" || result.Error != "" || result.ExitCode != 0 {
-		t.Fatalf("unexpected static action response: %#v", result)
+	Handler(backend).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v3/manifest", nil))
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("invalid backend manifest returned %d", response.Code)
 	}
 }
 
-func TestActionRequiresExactlyOneImplementation(t *testing.T) {
-	for _, action := range []ActionSpec{
-		{Action: connectors.Action{ID: "empty", Name: "Empty"}},
-		{Action: connectors.Action{ID: "both", Name: "Both"}, Command: "true", Output: "text"},
-	} {
-		config := testConfiguration()
-		config.Actions = []ActionSpec{action}
-		if _, err := LoadConfig(writeConfig(t, config)); err == nil || !strings.Contains(err.Error(), "exactly one") {
-			t.Fatalf("invalid action implementation was accepted: %#v, %v", action, err)
-		}
+type testBackend struct{ invalidManifest bool }
+
+func (b *testBackend) Manifest(context.Context) (connectors.Manifest, error) {
+	manifest := connectors.Manifest{ProtocolVersion: connectors.ProtocolVersion, ID: "test", Name: "Test", Version: "3.0.0", Views: []connectors.ViewDescriptor{{ID: "overview", Title: "Overview"}}, Actions: []connectors.ActionDescriptor{{ID: "survey", Name: "Survey"}}, Sessions: []connectors.SessionDescriptor{{ID: "console", Name: "Console"}}}
+	if b.invalidManifest {
+		manifest.ProtocolVersion = 2
 	}
+	return manifest, nil
 }
 
-func TestNativeHostStopsWithItsContext(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	host, err := StartNative(ctx, writeConfig(t, testConfiguration()))
-	if err != nil {
-		t.Fatal(err)
+func (b *testBackend) View(_ context.Context, id string) (connectors.View, error) {
+	if id != "overview" {
+		return connectors.View{}, ErrNotFound
 	}
-	cancel()
-	shutdown, stop := context.WithTimeout(context.Background(), 3*time.Second)
-	defer stop()
-	if err := host.Close(shutdown); err != nil {
-		t.Fatal(err)
-	}
+	return connectors.View{ID: id, Title: "Overview", Blocks: []connectors.Block{{ID: "ready", Kind: connectors.BlockStatus, Text: "ready"}}}, nil
 }
 
-func testConfiguration() Configuration {
-	return Configuration{
-		Manifest: connectors.Manifest{
-			ProtocolVersion: connectors.ProtocolVersion,
-			ID:              "test",
-			Name:            "Test",
-			UI: connectors.UIConfig{
-				Sidebar: []connectors.Panel{{ID: "actions", Title: "Actions", Kind: connectors.PanelActions}},
-				Main:    []connectors.Panel{{ID: "summary", Title: "Summary", Kind: connectors.PanelSummary}},
-			},
-		},
-		Actions: []ActionSpec{{Action: connectors.Action{ID: "check", Name: "Check"}, Command: "unused"}},
-	}
+func (b *testBackend) StartJob(context.Context, connectors.StartJobRequest) (connectors.Job, error) {
+	return b.job(), nil
+}
+func (b *testBackend) Job(context.Context, string) (connectors.Job, error)       { return b.job(), nil }
+func (b *testBackend) CancelJob(context.Context, string) (connectors.Job, error) { return b.job(), nil }
+func (b *testBackend) Artifact(context.Context, string, string) (ArtifactPayload, error) {
+	data := []byte("report")
+	sum := sha256.Sum256(data)
+	return ArtifactPayload{Metadata: connectors.Artifact{ID: "report", Name: `report".md`, Size: int64(len(data)), SHA256: hex.EncodeToString(sum[:])}, Data: data}, nil
+}
+func (b *testBackend) OpenSession(context.Context, connectors.OpenSessionRequest) (connectors.Session, error) {
+	return b.session("open"), nil
+}
+func (b *testBackend) SessionInput(context.Context, string, connectors.SessionInputRequest) (connectors.Session, error) {
+	return b.session("open"), nil
+}
+func (b *testBackend) ResizeSession(context.Context, string, connectors.ResizeSessionRequest) (connectors.Session, error) {
+	return b.session("open"), nil
+}
+func (b *testBackend) CloseSession(context.Context, string) (connectors.Session, error) {
+	return b.session("closed"), nil
+}
+func (b *testBackend) job() connectors.Job {
+	return connectors.Job{ID: "job-1", ActionID: "survey", Status: connectors.JobSucceeded, Progress: 100}
+}
+func (b *testBackend) session(status string) connectors.Session {
+	return connectors.Session{ID: "session-1", SessionID: "console", Status: status}
 }
 
-func writeConfig(t *testing.T, config Configuration) string {
-	t.Helper()
-	data, err := json.Marshal(config)
-	if err != nil {
-		t.Fatal(err)
+func TestWriteJSONProducesJSON(t *testing.T) {
+	response := httptest.NewRecorder()
+	writeJSON(response, http.StatusOK, map[string]string{"status": "ok"})
+	var value map[string]string
+	if err := json.Unmarshal(response.Body.Bytes(), &value); err != nil || value["status"] != "ok" {
+		t.Fatalf("invalid JSON response: %s %v", response.Body.String(), err)
 	}
-	path := filepath.Join(t.TempDir(), "extension.json")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return path
 }

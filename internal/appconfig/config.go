@@ -135,25 +135,57 @@ func (config *TerminalConfig) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// ConnectorConfig describes a manifest-driven extension. Docker mode uses its
-// image/network fields; Wormsign mode hosts NativeConfig on loopback. The TUI
+// ConnectorConfig is resolved from a discovered lifecycle bundle. Docker mode
+// uses its image and grants; vm mode launches its platform executable. The TUI
 // knows only the shared protocol advertised by either runtime.
 type ConnectorConfig struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	Icon         string   `json:"icon,omitempty"`
-	Description  string   `json:"description,omitempty"`
-	Enabled      bool     `json:"enabled"`
-	Managed      bool     `json:"managed"`
-	Image        string   `json:"image,omitempty"`
-	BuildContext string   `json:"build_context,omitempty"`
-	Dockerfile   string   `json:"dockerfile,omitempty"`
-	NativeConfig string   `json:"native_config,omitempty"`
-	Container    string   `json:"container"`
-	User         string   `json:"user,omitempty"`
-	Network      string   `json:"network"`
-	Endpoint     string   `json:"endpoint"`
-	Tmpfs        []string `json:"tmpfs,omitempty"`
+	ID               string          `json:"id"`
+	Name             string          `json:"name"`
+	Icon             string          `json:"icon,omitempty"`
+	Description      string          `json:"description,omitempty"`
+	Enabled          bool            `json:"enabled"`
+	Managed          bool            `json:"managed"`
+	External         bool            `json:"external,omitempty"`
+	Bundle           string          `json:"bundle,omitempty"`
+	Version          string          `json:"version,omitempty"`
+	Image            string          `json:"image,omitempty"`
+	BuildContext     string          `json:"build_context,omitempty"`
+	Dockerfile       string          `json:"dockerfile,omitempty"`
+	NativeExecutable string          `json:"native_executable,omitempty"`
+	NativePackage    string          `json:"native_package,omitempty"`
+	NativeArguments  []string        `json:"native_arguments,omitempty"`
+	Container        string          `json:"container"`
+	User             string          `json:"user,omitempty"`
+	Network          string          `json:"network"`
+	Endpoint         string          `json:"endpoint"`
+	Tmpfs            []string        `json:"tmpfs,omitempty"`
+	Environment      []string        `json:"environment,omitempty"`
+	Requests         ExtensionGrants `json:"requests,omitempty"`
+	Grants           ExtensionGrants `json:"grants,omitempty"`
+}
+
+// UnmarshalJSON accepts the removed declarative native_config key only as a
+// one-way config migration. No protocol-v2 host or runtime is retained.
+func (connector *ConnectorConfig) UnmarshalJSON(data []byte) error {
+	type ConnectorWire ConnectorConfig
+	var wire struct {
+		ConnectorWire
+		NativeConfig string `json:"native_config,omitempty"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&wire); err != nil {
+		return err
+	}
+	*connector = ConnectorConfig(wire.ConnectorWire)
+	return nil
+}
+
+type ExtensionGrants struct {
+	Internet        bool `json:"internet,omitempty"`
+	PersistentState bool `json:"persistent_state,omitempty"`
+	SharedRead      bool `json:"shared_read,omitempty"`
+	SharedWrite     bool `json:"shared_write,omitempty"`
 }
 
 type Document struct {
@@ -240,7 +272,7 @@ func ProfileFromPreset(preset Preset, now time.Time) Profile {
 		Tools:      map[string]bool{},
 		Agents:     map[string]bool{},
 		Terminal:   defaultTerminal(),
-		Connectors: defaultConnectors(),
+		Connectors: nil,
 	}
 	for _, option := range Options {
 		profile.Set(option.Category, option.ID, preset.Enabled[option.ID])
@@ -256,6 +288,8 @@ func (p Profile) Clone() Profile {
 	clone.Connectors = append([]ConnectorConfig(nil), p.Connectors...)
 	for index := range clone.Connectors {
 		clone.Connectors[index].Tmpfs = append([]string(nil), p.Connectors[index].Tmpfs...)
+		clone.Connectors[index].Environment = append([]string(nil), p.Connectors[index].Environment...)
+		clone.Connectors[index].NativeArguments = append([]string(nil), p.Connectors[index].NativeArguments...)
 	}
 	return clone
 }
@@ -539,29 +573,20 @@ func normalizeProfile(profile *Profile) {
 		}
 	}
 	if profile.Connectors == nil {
-		profile.Connectors = defaultConnectors()
-	} else {
-		// Remove examples bundled by older releases while retaining third-party
-		// extensions. Ixian Proving Ground replaces them as the sole opt-in
-		// protocol reference.
-		retained := profile.Connectors[:0]
-		for _, connector := range profile.Connectors {
-			if connector.ID != "mobile-lab" && connector.ID != "runtime-scout" && connector.ID != "host-check" && connector.ID != "guild-navigator" {
-				retained = append(retained, connector)
-			}
-		}
-		profile.Connectors = retained
-
-		configured := make(map[string]bool, len(profile.Connectors))
-		for _, connector := range profile.Connectors {
-			configured[connector.ID] = true
-		}
-		for _, connector := range defaultConnectors() {
-			if !configured[connector.ID] {
-				profile.Connectors = append(profile.Connectors, connector)
-			}
+		profile.Connectors = []ConnectorConfig{}
+	}
+	// Retire bundled protocol-v2 examples during config normalization. This is
+	// data cleanup only; none of their host, endpoints, or behavior survives.
+	retained := profile.Connectors[:0]
+	for _, connector := range profile.Connectors {
+		switch connector.ID {
+		case "ixian-proving-ground", "mobile-lab", "runtime-scout", "host-check", "guild-navigator":
+			continue
+		default:
+			retained = append(retained, connector)
 		}
 	}
+	profile.Connectors = retained
 	for index := range profile.Connectors {
 		normalizeConnector(&profile.Connectors[index])
 	}
@@ -617,27 +642,6 @@ func defaultTerminal() TerminalConfig {
 	}
 }
 
-func defaultConnectors() []ConnectorConfig {
-	return []ConnectorConfig{
-		{
-			ID:           "ixian-proving-ground",
-			Name:         "Ixian Proving Ground",
-			Icon:         "󰒓",
-			Description:  "Disabled reference sidecar exercising every extension protocol v2 TUI capability",
-			Enabled:      false,
-			Managed:      true,
-			Image:        "lisanalgaib/ixian-proving-ground:1",
-			BuildContext: ".",
-			Dockerfile:   "docker/connectors/ixian-proving-ground/Dockerfile",
-			NativeConfig: "docker/connectors/ixian-proving-ground/extension.json",
-			Container:    "lisan-ixian-proving-ground",
-			User:         "10001:10001",
-			Network:      "arrakis-shield-wall",
-			Endpoint:     "http://lisan-ixian-proving-ground:7777",
-		},
-	}
-}
-
 func normalizeConnector(connector *ConnectorConfig) {
 	connector.ID = strings.TrimSpace(connector.ID)
 	connector.Name = textsafe.Label(connector.Name, 100)
@@ -646,7 +650,10 @@ func normalizeConnector(connector *ConnectorConfig) {
 	connector.Image = strings.TrimSpace(connector.Image)
 	connector.BuildContext = strings.TrimSpace(connector.BuildContext)
 	connector.Dockerfile = strings.TrimSpace(connector.Dockerfile)
-	connector.NativeConfig = strings.TrimSpace(connector.NativeConfig)
+	connector.Bundle = filepath.ToSlash(strings.TrimSpace(connector.Bundle))
+	connector.Version = strings.TrimSpace(connector.Version)
+	connector.NativeExecutable = filepath.ToSlash(strings.TrimSpace(connector.NativeExecutable))
+	connector.NativePackage = filepath.ToSlash(strings.TrimSpace(connector.NativePackage))
 	connector.Container = strings.TrimSpace(connector.Container)
 	connector.User = strings.TrimSpace(connector.User)
 	connector.Network = strings.TrimSpace(connector.Network)
@@ -669,10 +676,8 @@ func normalizeConnector(connector *ConnectorConfig) {
 	if connector.Network == "" {
 		connector.Network = "arrakis-shield-wall"
 	}
-	if connector.NativeConfig == "" {
-		if connector.ID == "ixian-proving-ground" {
-			connector.NativeConfig = "docker/connectors/ixian-proving-ground/extension.json"
-		}
+	if connector.Grants.SharedWrite {
+		connector.Grants.SharedRead = true
 	}
 }
 
@@ -730,14 +735,23 @@ func validateProfile(profile Profile, requireID bool) error {
 			return fmt.Errorf("config profile %q has duplicate extension id %q", profile.ID, connector.ID)
 		}
 		seen[connector.ID] = true
-		if !configIdentifier.MatchString(connector.Container) || !configIdentifier.MatchString(connector.Network) {
+		if !connector.External && (!configIdentifier.MatchString(connector.Container) || !configIdentifier.MatchString(connector.Network)) {
 			return fmt.Errorf("extension %q has an invalid container or network name", connector.ID)
 		}
-		if connector.Managed && (connector.Image == "" || connector.NativeConfig == "") {
-			return fmt.Errorf("managed extension %q requires image and native_config", connector.ID)
+		if connector.Managed && connector.External {
+			return fmt.Errorf("managed extension %q cannot use an external runtime", connector.ID)
+		}
+		if connector.Managed && (connector.Image == "" || connector.NativeExecutable == "") {
+			return fmt.Errorf("managed extension %q requires image and native_executable", connector.ID)
 		}
 		if connector.Managed && !validContainerUser(connector.User) {
 			return fmt.Errorf("managed extension %q has invalid container user %q", connector.ID, connector.User)
+		}
+		if connector.Grants.SharedWrite && !connector.Grants.SharedRead {
+			return fmt.Errorf("managed extension %q cannot grant shared_write without shared_read", connector.ID)
+		}
+		if connector.Managed && !grantsWithinRequests(connector.Grants, connector.Requests) {
+			return fmt.Errorf("managed extension %q grants a capability it did not request", connector.ID)
 		}
 		if connector.Enabled {
 			parsed, err := url.Parse(connector.Endpoint)
@@ -747,6 +761,13 @@ func validateProfile(profile Profile, requireID bool) error {
 		}
 	}
 	return nil
+}
+
+func grantsWithinRequests(granted, requested ExtensionGrants) bool {
+	return (!granted.Internet || requested.Internet) &&
+		(!granted.PersistentState || requested.PersistentState) &&
+		(!granted.SharedRead || requested.SharedRead) &&
+		(!granted.SharedWrite || requested.SharedWrite)
 }
 
 func knownOption(category Category, id string) bool {

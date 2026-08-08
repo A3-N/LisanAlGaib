@@ -4,24 +4,36 @@ set -eu
 project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 archive="$project_root/internal/runtimebundle/assets/runtime.tar.gz"
 dist="$project_root/dist"
+active_goos=
+active_goarch=
 cd "$project_root"
 
 cleanup() {
 	[ ! -e "$archive" ] || unlink "$archive"
+	if [ -n "$active_goos" ]; then
+		"$project_root/scripts/go" run ./cmd/lisan-runtime-pack clean "$project_root" "$active_goos" "$active_goarch" >/dev/null 2>&1 || true
+	fi
 }
 trap cleanup EXIT
 
 mkdir -p "$dist"
-"$project_root/scripts/go" run ./cmd/lisan-runtime-pack "$project_root" "$archive"
 
 build() {
 	goos=$1
 	goarch=$2
 	extension=$3
 	output="$dist/lisan_${goos}_${goarch}${extension}"
+	active_goos=$goos
+	active_goarch=$goarch
 	printf 'Building %s/%s -> %s\n' "$goos" "$goarch" "$output"
+	"$project_root/scripts/go" run ./cmd/lisan-runtime-pack prepare "$project_root" "$goos" "$goarch"
+	"$project_root/scripts/go" run ./cmd/lisan-runtime-pack "$project_root" "$archive"
 	CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch \
 		"$project_root/scripts/go" build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' -o "$output" ./cmd/lisan
+	unlink "$archive"
+	"$project_root/scripts/go" run ./cmd/lisan-runtime-pack clean "$project_root" "$goos" "$goarch"
+	active_goos=
+	active_goarch=
 }
 
 build linux amd64 ""

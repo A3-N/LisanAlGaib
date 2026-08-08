@@ -23,6 +23,7 @@ const (
 	rowProfile
 	rowOption
 	rowConnector
+	rowConnectorGrant
 	rowTerminal
 )
 
@@ -52,6 +53,7 @@ type row struct {
 	profile     int
 	option      int
 	connector   int
+	grant       string
 	setting     string
 	value       string
 }
@@ -178,7 +180,10 @@ func (m *Model) rows() []row {
 
 	connectors := make([]row, 0, len(m.working.Connectors))
 	for index, connector := range m.working.Connectors {
-		connectors = append(connectors, row{kind: rowConnector, label: connector.Name, description: connector.Description + " · " + connector.Network, connector: index})
+		connectors = append(connectors, row{kind: rowConnector, label: connector.Name, description: connector.Description + " · disabled by default", connector: index})
+		for _, grant := range requestedGrantRows(connector, index) {
+			connectors = append(connectors, grant)
+		}
 	}
 	rows = m.appendDropdown(rows, "connectors", "EXTENSION CONTAINERS", connectors)
 
@@ -265,6 +270,16 @@ func (m *Model) activate(index int) tea.Cmd {
 			state = "enabled"
 		}
 		m.status = connector.Name + " extension " + state
+	case rowConnectorGrant:
+		connector := &m.working.Connectors[selected.connector]
+		enabled := toggleGrant(&connector.Grants, selected.grant)
+		m.working.Preset = ""
+		m.source = "custom"
+		state := "denied"
+		if enabled {
+			state = "granted"
+		}
+		m.status = connector.Name + " · " + selected.label + " " + state
 	case rowTerminal:
 		m.working.Terminal.DockerShell = selected.value
 		m.working.Preset = ""
@@ -278,17 +293,9 @@ func (m *Model) applyPreset(index int) {
 	preset := appconfig.Presets[index]
 	configuredConnectors := m.working.Clone().Connectors
 	m.working = appconfig.ProfileFromPreset(preset, time.Now())
-	known := make(map[string]bool, len(m.working.Connectors))
-	for _, connector := range m.working.Connectors {
-		known[connector.ID] = true
-	}
 	for _, connector := range configuredConnectors {
-		if known[connector.ID] {
-			continue
-		}
-		// Presets control whether extensions launch, but never discard a user's
-		// third-party extension definition.
-		connector.Enabled = preset.ID == "full"
+		// Extension lifecycle and permissions are deliberately independent from
+		// core presets. Loading a preset never enables a sidecar or broadens it.
 		m.working.Connectors = append(m.working.Connectors, connector)
 	}
 	m.source = "preset:" + preset.ID
@@ -384,6 +391,12 @@ func (m *Model) View() tea.View {
 				mark = "■"
 			}
 			line = "    " + mark + " " + current.label
+		case rowConnectorGrant:
+			mark := "□"
+			if grantEnabled(m.working.Connectors[current.connector].Grants, current.grant) {
+				mark = "■"
+			}
+			line = "      " + mark + " " + current.label
 		case rowTerminal:
 			selected := current.setting == "docker-shell" && m.working.Terminal.DockerShell == current.value
 			mark := "○"
@@ -420,6 +433,67 @@ func (m *Model) View() tea.View {
 	view.BackgroundColor = lipgloss.Color(t.Background)
 	view.ForegroundColor = lipgloss.Color(t.Text)
 	return view
+}
+
+func requestedGrantRows(connector appconfig.ConnectorConfig, index int) []row {
+	definitions := []struct {
+		requested   bool
+		id          string
+		label       string
+		description string
+	}{
+		{connector.Requests.Internet, "internet", "Internet access", "Attach the sidecar to the outbound Docker network"},
+		{connector.Requests.PersistentState, "persistent-state", "Persistent state", "Keep extension-owned data in a managed volume"},
+		{connector.Requests.SharedRead, "shared-read", "Read shared files", "Mount Lisan's shared exchange directory read-only"},
+		{connector.Requests.SharedWrite, "shared-write", "Write shared files", "Allow writes to Lisan's shared exchange directory"},
+	}
+	var rows []row
+	for _, definition := range definitions {
+		if definition.requested {
+			rows = append(rows, row{kind: rowConnectorGrant, label: definition.label, description: definition.description, connector: index, grant: definition.id})
+		}
+	}
+	return rows
+}
+
+func grantEnabled(grants appconfig.ExtensionGrants, id string) bool {
+	switch id {
+	case "internet":
+		return grants.Internet
+	case "persistent-state":
+		return grants.PersistentState
+	case "shared-read":
+		return grants.SharedRead
+	case "shared-write":
+		return grants.SharedWrite
+	default:
+		return false
+	}
+}
+
+func toggleGrant(grants *appconfig.ExtensionGrants, id string) bool {
+	switch id {
+	case "internet":
+		grants.Internet = !grants.Internet
+		return grants.Internet
+	case "persistent-state":
+		grants.PersistentState = !grants.PersistentState
+		return grants.PersistentState
+	case "shared-read":
+		grants.SharedRead = !grants.SharedRead
+		if !grants.SharedRead {
+			grants.SharedWrite = false
+		}
+		return grants.SharedRead
+	case "shared-write":
+		grants.SharedWrite = !grants.SharedWrite
+		if grants.SharedWrite {
+			grants.SharedRead = true
+		}
+		return grants.SharedWrite
+	default:
+		return false
+	}
 }
 
 func compactView(width, height int, message, title string) tea.View {

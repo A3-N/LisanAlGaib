@@ -1,5 +1,6 @@
-// Package extensionhost serves the manifest-driven extension protocol either
-// as a standalone sidecar binary or as a native, lifecycle-bound host process.
+// Package extensionhost provides an optional Go server adapter for protocol v3.
+// Extensions may use it, or implement the documented HTTP contract in any
+// language without importing Lisan code.
 package extensionhost
 
 import (
@@ -11,298 +12,225 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"os/exec"
 	"strings"
-	"sync"
 	"time"
 
-	"lisanalgaib/internal/childproc"
 	"lisanalgaib/internal/connectors"
-	"lisanalgaib/internal/safefile"
 )
 
-type Configuration struct {
-	Manifest connectors.Manifest `json:"manifest"`
-	Tools    []ToolSpec          `json:"tools,omitempty"`
-	Actions  []ActionSpec        `json:"actions,omitempty"`
+var ErrNotFound = errors.New("extension resource not found")
+
+type ArtifactPayload struct {
+	Metadata connectors.Artifact
+	Data     []byte
 }
 
-type ToolSpec struct {
-	connectors.Tool
-	Command     string   `json:"command"`
-	VersionArgs []string `json:"version_args,omitempty"`
+// Backend is the complete protocol-v3 extension surface. Every method runs in
+// the extension process, never in Lisan's core process.
+type Backend interface {
+	Manifest(context.Context) (connectors.Manifest, error)
+	View(context.Context, string) (connectors.View, error)
+	StartJob(context.Context, connectors.StartJobRequest) (connectors.Job, error)
+	Job(context.Context, string) (connectors.Job, error)
+	CancelJob(context.Context, string) (connectors.Job, error)
+	Artifact(context.Context, string, string) (ArtifactPayload, error)
+	OpenSession(context.Context, connectors.OpenSessionRequest) (connectors.Session, error)
+	SessionInput(context.Context, string, connectors.SessionInputRequest) (connectors.Session, error)
+	ResizeSession(context.Context, string, connectors.ResizeSessionRequest) (connectors.Session, error)
+	CloseSession(context.Context, string) (connectors.Session, error)
 }
 
-type ActionSpec struct {
-	connectors.Action
-	Command string   `json:"command,omitempty"`
-	Args    []string `json:"args,omitempty"`
-	Output  string   `json:"output,omitempty"`
-}
-
-type Host struct {
-	endpoint  string
-	server    *http.Server
-	cancel    context.CancelFunc
-	done      chan struct{}
-	errMu     sync.RWMutex
-	err       error
-	closeOnce sync.Once
-}
-
-func LoadConfig(path string) (Configuration, error) {
-	data, err := safefile.Read(path, 1<<20)
-	if err != nil {
-		return Configuration{}, fmt.Errorf("read mandatory extension config: %w", err)
-	}
-	var config Configuration
-	if err := decodeStrictJSON(strings.NewReader(string(data)), &config); err != nil {
-		return Configuration{}, fmt.Errorf("decode extension config: %w", err)
-	}
-	config.Manifest.Tools = nil
-	config.Manifest.Actions = nil
-	if len(config.Tools) > connectors.MaxTools || len(config.Actions) > connectors.MaxActions {
-		return Configuration{}, fmt.Errorf("extension config exceeds the %d tool/action limit", connectors.MaxTools)
-	}
-	seenTools := map[string]bool{}
-	for _, tool := range config.Tools {
-		if tool.ID == "" || tool.Name == "" || tool.Command == "" || seenTools[tool.ID] {
-			return Configuration{}, errors.New("each extension tool requires a unique id, name, and command")
-		}
-		seenTools[tool.ID] = true
-		config.Manifest.Tools = append(config.Manifest.Tools, tool.Tool)
-	}
-	seenActions := map[string]bool{}
-	for _, action := range config.Actions {
-		implementationCount := 0
-		if action.Command != "" {
-			implementationCount++
-		}
-		if action.Output != "" {
-			implementationCount++
-		}
-		if action.ID == "" || action.Name == "" || implementationCount != 1 || seenActions[action.ID] {
-			return Configuration{}, errors.New("each extension action requires a unique id and name, plus exactly one command or static output")
-		}
-		seenActions[action.ID] = true
-		config.Manifest.Actions = append(config.Manifest.Actions, action.Action)
-	}
-	if err := connectors.ValidateManifest(config.Manifest); err != nil {
-		return Configuration{}, fmt.Errorf("validate extension config: %w", err)
-	}
-	return config, nil
-}
-
-// StartNative binds an extension to an ephemeral loopback port. The returned
-// endpoint is written into the in-memory Wormsign profile and is never
-// persisted to the user's Docker configuration.
-func StartNative(parent context.Context, configPath string) (*Host, error) {
-	config, err := LoadConfig(configPath)
-	if err != nil {
-		return nil, err
-	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return nil, fmt.Errorf("listen for native extension %s: %w", config.Manifest.ID, err)
-	}
-	return start(parent, listener, config), nil
-}
-
-func (h *Host) Endpoint() string { return h.endpoint }
-
-func (h *Host) Close(ctx context.Context) error {
-	h.closeOnce.Do(func() {
-		h.cancel()
-		_ = h.server.Shutdown(ctx)
-	})
-	select {
-	case <-h.done:
-		h.errMu.RLock()
-		err := h.err
-		h.errMu.RUnlock()
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
-		}
-		return err
-	case <-ctx.Done():
-		_ = h.server.Close()
-		return ctx.Err()
-	}
-}
-
-// Serve runs the standalone extension-host used by the Docker images.
-func Serve(ctx context.Context, listen, configPath string, logger *log.Logger) error {
-	config, err := LoadConfig(configPath)
-	if err != nil {
-		return err
-	}
+func Serve(ctx context.Context, listen string, backend Backend, logger *log.Logger) error {
 	listener, err := net.Listen("tcp", listen)
 	if err != nil {
 		return err
 	}
-	host := start(ctx, listener, config)
-	if logger != nil {
-		logger.Printf("extension %s listening on %s", config.Manifest.ID, listener.Addr())
-	}
-	<-host.done
-	host.errMu.RLock()
-	defer host.errMu.RUnlock()
-	if errors.Is(host.err, http.ErrServerClosed) {
-		return nil
-	}
-	return host.err
-}
-
-func start(parent context.Context, listener net.Listener, config Configuration) *Host {
-	base, cancel := context.WithCancel(parent)
 	server := &http.Server{
-		Handler:           handler(config),
+		Handler:           Handler(backend),
 		ReadHeaderTimeout: 3 * time.Second,
-		ReadTimeout:       5 * time.Second,
-		WriteTimeout:      25 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       30 * time.Second,
-		BaseContext: func(net.Listener) context.Context {
-			return base
-		},
+		BaseContext:       func(net.Listener) context.Context { return ctx },
 	}
-	host := &Host{
-		endpoint: "http://" + listener.Addr().String(),
-		server:   server,
-		cancel:   cancel,
-		done:     make(chan struct{}),
+	if logger != nil {
+		logger.Printf("extension protocol v3 listening on %s", listener.Addr())
 	}
-	go func() {
-		err := server.Serve(listener)
-		host.errMu.Lock()
-		host.err = err
-		host.errMu.Unlock()
-		close(host.done)
-		cancel()
-	}()
-	go func() {
-		<-base.Done()
-		shutdown, stop := context.WithTimeout(context.Background(), 3*time.Second)
-		defer stop()
-		_ = host.Close(shutdown)
-	}()
-	return host
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(listener) }()
+	select {
+	case <-ctx.Done():
+		shutdown, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdown)
+		err := <-done
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case err := <-done:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	}
 }
 
-func handler(config Configuration) http.Handler {
+func Handler(backend Backend) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v1/health", func(writer http.ResponseWriter, _ *http.Request) {
-		writeJSON(writer, http.StatusOK, map[string]string{"status": "ok", "extension": config.Manifest.ID})
+	mux.HandleFunc("GET /v3/health", func(writer http.ResponseWriter, request *http.Request) {
+		manifest, err := backend.Manifest(request.Context())
+		if err != nil {
+			writeError(writer, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, map[string]string{"status": "ok", "extension": manifest.ID, "protocol": "3"})
 	})
-	mux.HandleFunc("GET /v1/manifest", func(writer http.ResponseWriter, _ *http.Request) {
-		writeJSON(writer, http.StatusOK, buildManifest(config))
+	mux.HandleFunc("GET /v3/manifest", func(writer http.ResponseWriter, request *http.Request) {
+		manifest, err := backend.Manifest(request.Context())
+		if err != nil {
+			writeError(writer, err)
+			return
+		}
+		if err := connectors.ValidateManifest(manifest); err != nil {
+			writeError(writer, fmt.Errorf("invalid backend manifest: %w", err))
+			return
+		}
+		writeJSON(writer, http.StatusOK, manifest)
 	})
-	mux.HandleFunc("POST /v1/run", func(writer http.ResponseWriter, request *http.Request) {
-		runHandler(config, writer, request)
+	mux.HandleFunc("GET /v3/views/{view}", func(writer http.ResponseWriter, request *http.Request) {
+		view, err := backend.View(request.Context(), request.PathValue("view"))
+		if err != nil {
+			writeError(writer, err)
+			return
+		}
+		if err := connectors.ValidateView(view); err != nil {
+			writeError(writer, fmt.Errorf("invalid backend view: %w", err))
+			return
+		}
+		writeJSON(writer, http.StatusOK, view)
+	})
+	mux.HandleFunc("POST /v3/jobs", func(writer http.ResponseWriter, request *http.Request) {
+		var input connectors.StartJobRequest
+		if err := decodeRequest(writer, request, &input); err != nil {
+			writeJSON(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		job, err := backend.StartJob(request.Context(), input)
+		if err != nil {
+			writeError(writer, err)
+			return
+		}
+		if err := connectors.ValidateJob(job); err != nil {
+			writeError(writer, fmt.Errorf("invalid backend job: %w", err))
+			return
+		}
+		writeJSON(writer, http.StatusAccepted, job)
+	})
+	mux.HandleFunc("GET /v3/jobs/{job}", func(writer http.ResponseWriter, request *http.Request) {
+		job, err := backend.Job(request.Context(), request.PathValue("job"))
+		writeJob(writer, job, err)
+	})
+	mux.HandleFunc("DELETE /v3/jobs/{job}", func(writer http.ResponseWriter, request *http.Request) {
+		job, err := backend.CancelJob(request.Context(), request.PathValue("job"))
+		writeJob(writer, job, err)
+	})
+	mux.HandleFunc("GET /v3/jobs/{job}/artifacts/{artifact}", func(writer http.ResponseWriter, request *http.Request) {
+		payload, err := backend.Artifact(request.Context(), request.PathValue("job"), request.PathValue("artifact"))
+		if err != nil {
+			writeError(writer, err)
+			return
+		}
+		if int64(len(payload.Data)) != payload.Metadata.Size || len(payload.Data) > connectors.MaxArtifactBytes {
+			writeError(writer, errors.New("backend artifact data does not match metadata"))
+			return
+		}
+		mediaType := payload.Metadata.MediaType
+		if mediaType == "" {
+			mediaType = "application/octet-stream"
+		}
+		writer.Header().Set("Content-Type", mediaType)
+		writer.Header().Set("Content-Disposition", `attachment; filename="`+strings.ReplaceAll(payload.Metadata.Name, `"`, "")+`"`)
+		writer.WriteHeader(http.StatusOK)
+		_, _ = writer.Write(payload.Data)
+	})
+	mux.HandleFunc("POST /v3/sessions", func(writer http.ResponseWriter, request *http.Request) {
+		var input connectors.OpenSessionRequest
+		if err := decodeRequest(writer, request, &input); err != nil {
+			writeJSON(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		session, err := backend.OpenSession(request.Context(), input)
+		writeSession(writer, session, err)
+	})
+	mux.HandleFunc("POST /v3/sessions/{session}/input", func(writer http.ResponseWriter, request *http.Request) {
+		var input connectors.SessionInputRequest
+		if err := decodeRequest(writer, request, &input); err != nil {
+			writeJSON(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		session, err := backend.SessionInput(request.Context(), request.PathValue("session"), input)
+		writeSession(writer, session, err)
+	})
+	mux.HandleFunc("POST /v3/sessions/{session}/resize", func(writer http.ResponseWriter, request *http.Request) {
+		var input connectors.ResizeSessionRequest
+		if err := decodeRequest(writer, request, &input); err != nil {
+			writeJSON(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		session, err := backend.ResizeSession(request.Context(), request.PathValue("session"), input)
+		writeSession(writer, session, err)
+	})
+	mux.HandleFunc("DELETE /v3/sessions/{session}", func(writer http.ResponseWriter, request *http.Request) {
+		session, err := backend.CloseSession(request.Context(), request.PathValue("session"))
+		writeSession(writer, session, err)
 	})
 	return mux
 }
 
-func buildManifest(config Configuration) connectors.Manifest {
-	manifest := config.Manifest
-	manifest.Tools = make([]connectors.Tool, 0, len(config.Tools))
-	for _, candidate := range config.Tools {
-		path, err := exec.LookPath(candidate.Command)
-		tool := candidate.Tool
-		tool.Ready = err == nil
-		if err == nil {
-			arguments := candidate.VersionArgs
-			if len(arguments) == 0 {
-				arguments = []string{"--version"}
-			}
-			tool.Version = firstLine(runVersion(path, arguments))
-		}
-		manifest.Tools = append(manifest.Tools, tool)
-	}
-	manifest.Actions = make([]connectors.Action, 0, len(config.Actions))
-	for _, action := range config.Actions {
-		manifest.Actions = append(manifest.Actions, action.Action)
-	}
-	return manifest
-}
-
-func runHandler(config Configuration, writer http.ResponseWriter, request *http.Request) {
-	request.Body = http.MaxBytesReader(writer, request.Body, 8<<10)
-	var input connectors.RunRequest
-	if err := decodeStrictJSON(request.Body, &input); err != nil {
-		writeJSON(writer, http.StatusBadRequest, connectors.RunResponse{Error: "invalid request"})
+func writeJob(writer http.ResponseWriter, job connectors.Job, err error) {
+	if err != nil {
+		writeError(writer, err)
 		return
 	}
-	for _, action := range config.Actions {
-		if action.ID == input.ActionID {
-			writeJSON(writer, http.StatusOK, runAction(request.Context(), action))
-			return
-		}
+	if err := connectors.ValidateJob(job); err != nil {
+		writeError(writer, fmt.Errorf("invalid backend job: %w", err))
+		return
 	}
-	writeJSON(writer, http.StatusNotFound, connectors.RunResponse{ActionID: input.ActionID, Error: "unknown action"})
+	writeJSON(writer, http.StatusOK, job)
 }
 
-func runAction(parent context.Context, action ActionSpec) connectors.RunResponse {
-	started := time.Now()
-	if action.Output != "" {
-		return connectors.RunResponse{
-			ActionID:   action.ID,
-			Output:     action.Output,
-			DurationMS: time.Since(started).Milliseconds(),
-		}
-	}
-	ctx, cancel := context.WithTimeout(parent, 12*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, action.Command, action.Args...)
-	childproc.Configure(command)
-	output, err := command.CombinedOutput()
-	if len(output) > 256<<10 {
-		output = append(output[:256<<10], []byte("\n[output truncated]\n")...)
-	}
-	result := connectors.RunResponse{ActionID: action.ID, Output: string(output), DurationMS: time.Since(started).Milliseconds()}
+func writeSession(writer http.ResponseWriter, session connectors.Session, err error) {
 	if err != nil {
-		result.Error = err.Error()
-		result.ExitCode = 1
-		var exit *exec.ExitError
-		if errors.As(err, &exit) {
-			result.ExitCode = exit.ExitCode()
-		}
+		writeError(writer, err)
+		return
 	}
-	if ctx.Err() == context.DeadlineExceeded {
-		result.Error = "action timed out"
+	if err := connectors.ValidateSession(session); err != nil {
+		writeError(writer, fmt.Errorf("invalid backend session: %w", err))
+		return
 	}
-	return result
+	writeJSON(writer, http.StatusOK, session)
 }
 
-func runVersion(path string, arguments []string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, path, arguments...)
-	childproc.Configure(command)
-	output, _ := command.CombinedOutput()
-	return string(output)
-}
-
-func firstLine(value string) string {
-	line, _, _ := strings.Cut(strings.TrimSpace(value), "\n")
-	if len([]rune(line)) > 120 {
-		line = string([]rune(line)[:120])
-	}
-	return line
-}
-
-func decodeStrictJSON(reader io.Reader, destination any) error {
-	decoder := json.NewDecoder(reader)
+func decodeRequest(writer http.ResponseWriter, request *http.Request, destination any) error {
+	request.Body = http.MaxBytesReader(writer, request.Body, 64<<10)
+	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
-		return err
+		return errors.New("invalid request")
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return errors.New("multiple JSON values are not allowed")
-		}
-		return err
+		return errors.New("request must contain one JSON value")
 	}
 	return nil
+}
+
+func writeError(writer http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	if errors.Is(err, ErrNotFound) {
+		status = http.StatusNotFound
+	}
+	writeJSON(writer, status, map[string]string{"error": err.Error()})
 }
 
 func writeJSON(writer http.ResponseWriter, status int, value any) {
