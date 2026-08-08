@@ -1,0 +1,14 @@
+* text=auto
+
+*.go text eol=lf
+*.json text eol=lf
+*.lua text eol=lf
+*.md text eol=lf
+*.sh text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+Dockerfile text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
+scripts/* text eol=lf
+docker/lisan-entrypoint text eol=lf

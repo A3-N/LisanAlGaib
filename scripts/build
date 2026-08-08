@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+set -eu
+
+project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$project_root"
+mkdir -p "$project_root/bin"
+exec "$project_root/scripts/go" build -trimpath -buildvcs=false -o "$project_root/bin/lisan" ./cmd/lisan

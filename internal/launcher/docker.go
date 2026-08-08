@@ -1,0 +1,157 @@
+package launcher
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"lisanalgaib/internal/appconfig"
+)
+
+const workspaceContainer = "sietch-tabr"
+
+type DockerOptions struct {
+	RuntimeRoot string
+	Workspace   string
+	Profile     appconfig.Profile
+	Stdin       io.Reader
+	Stdout      io.Writer
+	Stderr      io.Writer
+}
+
+func RunDocker(ctx context.Context, options DockerOptions) (resultErr error) {
+	profile, err := appconfig.NormalizeProfile(options.Profile)
+	if err != nil {
+		return err
+	}
+	options.Profile = profile
+	if _, err := exec.LookPath("docker"); err != nil {
+		return errors.New("Docker is required for docker mode; install Docker Desktop/Engine or choose vm")
+	}
+	root, err := resolveRuntimeRoot(options.RuntimeRoot)
+	if err != nil {
+		return err
+	}
+	compose := []string{"compose", "--project-directory", root, "-f", filepath.Join(root, "compose.yaml")}
+	run := func(arguments ...string) error {
+		command := exec.CommandContext(ctx, "docker", append(compose, arguments...)...)
+		command.Stdin, command.Stdout, command.Stderr = options.Stdin, options.Stdout, options.Stderr
+		return command.Run()
+	}
+	info := exec.CommandContext(ctx, "docker", "info")
+	info.Stdout, info.Stderr = io.Discard, options.Stderr
+	if err := info.Run(); err != nil {
+		return errors.New("Docker is installed but its daemon is unavailable; start Docker Desktop/Engine and retry")
+	}
+	buildPlan := resolveDockerBuildPlan(options.Profile)
+	buildSignature, err := dockerBuildSignature(root, buildPlan)
+	if err != nil {
+		return err
+	}
+	workspaceWasRunning := containerRunning(ctx, workspaceContainer)
+	imageSignature, inspectErr := dockerOutput(ctx, "image", "inspect", "--format", `{{index .Config.Labels "io.lisanalgaib.build-signature"}}`, "lisanalgaib:latest")
+	rebuilt := inspectErr != nil || strings.TrimSpace(imageSignature) != buildSignature
+	if rebuilt {
+		if err := run(buildPlan.buildArguments(buildSignature)...); err != nil {
+			return fmt.Errorf("build configured Docker workspace: %w", err)
+		}
+	}
+	upArguments := []string{"up", "-d", "--no-build"}
+	if rebuilt {
+		upArguments = append(upArguments, "--force-recreate")
+	}
+	if err := run(append(upArguments, "workspace")...); err != nil {
+		return fmt.Errorf("start configured Docker workspace: %w", err)
+	}
+	workspaceStarted := !workspaceWasRunning
+	var connectorState connectorSyncResult
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		if err := cleanupStartedDocker(cleanupCtx, workspaceStarted, connectorState.started, options.Stdout, options.Stderr); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("cleanup launched Docker services: %w", err))
+		}
+	}()
+	connectorState, err = syncConnectors(ctx, root, options.Profile.Connectors, options.Stdout, options.Stderr)
+	if err != nil {
+		return err
+	}
+	encoded, err := appconfig.EncodeProfile(options.Profile)
+	if err != nil {
+		return err
+	}
+	arguments := dockerExecArguments(options, encoded)
+	user := nonempty(options.Profile.Terminal.DockerUser, "fremen")
+	if err := run(arguments...); err != nil {
+		return fmt.Errorf("run Lisan as %s in Docker: %w", user, err)
+	}
+	return nil
+}
+
+func containerRunning(ctx context.Context, name string) bool {
+	value, err := dockerOutput(ctx, "inspect", "--format", `{{.State.Running}}`, name)
+	return err == nil && strings.TrimSpace(value) == "true"
+}
+
+func dockerExecArguments(options DockerOptions, encoded string) []string {
+	user := nonempty(options.Profile.Terminal.DockerUser, "fremen")
+	workdir := nonempty(options.Profile.Terminal.DockerWorkdir, "/home/fremen")
+	arguments := []string{
+		"exec", "-e", "TERM=" + nonempty(os.Getenv("TERM"), "xterm-256color"),
+		"-e", "COLORTERM=" + nonempty(os.Getenv("COLORTERM"), "truecolor"),
+		"-e", appconfig.EnvironmentProfile + "=" + encoded,
+		"-e", "HOME=" + dockerUserHome(user),
+		"--user", user, "--workdir", workdir, "workspace", "lisan", "run",
+	}
+	if strings.TrimSpace(options.Workspace) != "" {
+		arguments = append(arguments, options.Workspace)
+	}
+	return arguments
+}
+
+func dockerUserHome(user string) string {
+	if user == "root" {
+		return "/root"
+	}
+	return "/home/" + user
+}
+
+func resolveRuntimeRoot(configured string) (string, error) {
+	if configured != "" {
+		if isFile(filepath.Join(configured, "compose.yaml")) && isFile(filepath.Join(configured, "Dockerfile")) {
+			return configured, nil
+		}
+		return "", fmt.Errorf("configured Docker runtime is incomplete: %s", configured)
+	}
+	working, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("locate Docker runtime: %w", err)
+	}
+	for candidate := working; ; candidate = filepath.Dir(candidate) {
+		if isFile(filepath.Join(candidate, "compose.yaml")) && isFile(filepath.Join(candidate, "Dockerfile")) {
+			return candidate, nil
+		}
+		if candidate == filepath.Dir(candidate) {
+			break
+		}
+	}
+	return "", errors.New("Docker runtime not found; run 'lisan install' from a release binary or source checkout")
+}
+
+func isFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
+}
+
+func nonempty(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}

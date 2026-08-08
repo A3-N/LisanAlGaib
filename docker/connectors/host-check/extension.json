@@ -1,0 +1,31 @@
+{
+  "manifest": {
+    "protocol_version": 2,
+    "id": "host-check",
+    "name": "Ornithopter",
+    "icon": "󰒋",
+    "description": "Read-only system checks showing a modular Lisan extension",
+    "ui": {
+      "sidebar": [
+        { "id": "tools", "title": "Check tools", "kind": "tools" },
+        { "id": "actions", "title": "Checks", "kind": "actions", "expanded": true }
+      ],
+      "main": [
+        { "id": "summary", "title": "Runtime", "kind": "summary" },
+        { "id": "output", "title": "Check output", "kind": "action-output" }
+      ]
+    }
+  },
+  "tools": [
+    { "id": "hostname", "name": "hostname", "description": "Host name lookup", "command": "hostname" },
+    { "id": "uname", "name": "uname", "description": "Operating system identification", "command": "uname" },
+    { "id": "df", "name": "df", "description": "Filesystem usage", "command": "df" },
+    { "id": "uptime", "name": "uptime", "description": "Runtime uptime and load", "command": "uptime" }
+  ],
+  "actions": [
+    { "id": "hostname", "name": "Host name", "description": "Show the current runtime host name", "command": "hostname" },
+    { "id": "system", "name": "System information", "description": "Show the operating system and architecture", "command": "uname", "args": ["-a"] },
+    { "id": "uptime", "name": "Uptime", "description": "Show uptime and load averages", "command": "uptime" },
+    { "id": "disk", "name": "Filesystem usage", "description": "Show usage for the current filesystem", "command": "df", "args": ["-h", "."] }
+  ]
+}

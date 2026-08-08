@@ -1,0 +1,21 @@
+#!/usr/bin/env sh
+set -eu
+
+# Keep the patched dependency and build cache isolated without bloating the
+# checkout. These are disposable user-cache files, not project runtime files.
+if [ -n "${XDG_CACHE_HOME:-}" ]; then
+	lisan_cache_root="$XDG_CACHE_HOME/lisanalgaib/go"
+elif [ -n "${HOME:-}" ]; then
+	lisan_cache_root="$HOME/.cache/lisanalgaib/go"
+else
+	lisan_cache_root="${TMPDIR:-/tmp}/lisanalgaib-go"
+fi
+mkdir -p "$lisan_cache_root/mod" "$lisan_cache_root/build"
+export GOMODCACHE="$lisan_cache_root/mod"
+export GOCACHE="$lisan_cache_root/build"
+
+if ! command -v go >/dev/null 2>&1; then
+	printf '%s\n' "Go 1.26 is required for source builds; alternatively use a prebuilt lisan binary." >&2
+	exit 1
+fi
+exec go "$@"

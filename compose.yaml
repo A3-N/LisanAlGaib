@@ -1,0 +1,35 @@
+name: arrakis
+
+services:
+  workspace:
+    image: lisanalgaib:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sietch-tabr
+    hostname: tabr
+    init: true
+    tty: true
+    stdin_open: true
+    user: fremen
+    working_dir: /home/fremen
+    environment:
+      HOME: /home/fremen
+      USER: fremen
+      LOGNAME: fremen
+      TERM: xterm-256color
+      COLORTERM: truecolor
+      LISAN_CONTAINER: "1"
+    command: ["sleep", "infinity"]
+    labels:
+      io.lisanalgaib.workspace: "1"
+    volumes:
+      - usul:/home/fremen
+
+volumes:
+  usul:
+    name: arrakis-usul
+
+networks:
+  default:
+    name: arrakis-shield-wall

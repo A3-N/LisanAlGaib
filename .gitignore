@@ -1,0 +1,19 @@
+# Local toolchains, caches, and build outputs
+/.toolchain/
+/bin/
+/build/
+/dist/
+/out/
+/internal/runtimebundle/assets/runtime.tar.gz
+*.test
+*.exe
+*.prof
+
+# Runtime and editor state
+*.log
+.DS_Store
+.env
+.env.*
+!.env.example
+*.swp
+coverage.out

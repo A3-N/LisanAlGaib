@@ -1,0 +1,76 @@
+#!/bin/sh
+set -eu
+
+template=/usr/local/share/lisan/home
+nvim_template=/usr/local/share/lisan/nvim
+
+mkdir -p \
+  /home/fremen/agents/codex \
+  /home/fremen/agents/opencode \
+  /home/fremen/agents/kimi \
+  /home/fremen/agents/claude \
+  /home/fremen/projects
+
+seed_file() {
+  relative_path=$1
+  if [ ! -e "/home/fremen/$relative_path" ]; then
+    cp "$template/$relative_path" "/home/fremen/$relative_path"
+  fi
+}
+
+seed_file agents/README.md
+seed_file agents/codex/AGENTS.md
+seed_file agents/opencode/AGENTS.md
+seed_file agents/kimi/AGENTS.md
+seed_file agents/claude/CLAUDE.md
+if command -v fish >/dev/null 2>&1; then
+  mkdir -p /home/fremen/.config/fish
+  seed_file .config/fish/config.fish
+fi
+
+# A named home volume masks files added by a later profile image. Seed NvChad
+# when it becomes selected, but never replace an existing editor config.
+if [ "${LISAN_NVCHAD:-0}" = 1 ] && [ ! -e /home/fremen/.config/nvim ]; then
+  mkdir -p /home/fremen/.config/nvim
+  cp -a "$nvim_template/." /home/fremen/.config/nvim/
+fi
+
+# Migrate Lisan's NvChad additions inside existing persistent home volumes.
+# Dashboards without Lisan's fb action are deliberately left untouched.
+lisan_chadrc=/home/fremen/.config/nvim/lua/chadrc.lua
+lisan_nvchad_sync=0
+if command -v nvim >/dev/null 2>&1 && [ -f "$lisan_chadrc" ] && grep -Eq 'keys = "fb".*(NvimTree(Open|Focus)|lisan\.picker)' "$lisan_chadrc"; then
+  mkdir -p /home/fremen/.config/nvim/lua/lisan /home/fremen/.config/nvim/lua/plugins
+
+  if [ ! -f /home/fremen/.config/nvim/lua/lisan/picker.lua ] || \
+    ! cmp -s "$nvim_template/lua/lisan/picker.lua" /home/fremen/.config/nvim/lua/lisan/picker.lua; then
+    cp "$nvim_template/lua/lisan/picker.lua" /home/fremen/.config/nvim/lua/lisan/picker.lua
+  fi
+  if [ ! -f /home/fremen/.config/nvim/lua/plugins/lisan-file-browser.lua ] || \
+    ! cmp -s "$nvim_template/lua/plugins/lisan-file-browser.lua" /home/fremen/.config/nvim/lua/plugins/lisan-file-browser.lua; then
+    cp "$nvim_template/lua/plugins/lisan-file-browser.lua" /home/fremen/.config/nvim/lua/plugins/lisan-file-browser.lua
+    lisan_nvchad_sync=1
+  fi
+
+  cp "$nvim_template/lua/lisan/header.lua" /home/fremen/.config/nvim/lua/lisan/header.lua
+
+  if ! grep -q 'lisan.header' "$lisan_chadrc"; then
+    sed -i '/M.nvdash = {/a\  header = function() return require("lisan.header").lines() end,' "$lisan_chadrc"
+  fi
+
+  sed -i \
+    -e "/keys = \"fb\"/c\\    { txt = function() return require(\"lisan.picker\").workspace_label() end, keys = \"fb\", cmd = \"lua require('lisan.picker').choose_workspace()\" }," \
+    -e "/keys = \"ff\"/c\\    { txt = \"󰱼  Open File\", keys = \"ff\", cmd = \"lua require('lisan.picker').open_file()\" }," \
+    "$lisan_chadrc"
+
+  if [ ! -d /home/fremen/.local/share/nvim/lazy/telescope-file-browser.nvim ]; then
+    lisan_nvchad_sync=1
+  fi
+fi
+
+if [ "$lisan_nvchad_sync" -eq 1 ]; then
+  nvim --headless '+Lazy! install' +qa
+fi
+
+cd /home/fremen
+exec "$@"
