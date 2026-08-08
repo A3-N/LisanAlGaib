@@ -15,20 +15,35 @@ import (
 	"lisanalgaib/internal/connectors"
 )
 
-func TestBundledHostCheckConfigIsValid(t *testing.T) {
-	path := filepath.Join("..", "..", "docker", "connectors", "host-check", "extension.json")
+func TestBundledIxianProvingGroundExercisesProtocolV2(t *testing.T) {
+	path := filepath.Join("..", "..", "docker", "connectors", "ixian-proving-ground", "extension.json")
 	config, err := LoadConfig(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.Manifest.ID != "host-check" || len(config.Manifest.UI.Sidebar) != 2 {
-		t.Fatalf("unexpected Ornithopter config: %#v", config.Manifest)
+	if config.Manifest.ID != "ixian-proving-ground" || len(config.Manifest.UI.Sidebar) != 2 || len(config.Manifest.UI.Main) != 2 {
+		t.Fatalf("unexpected Ixian Proving Ground config: %#v", config.Manifest)
 	}
 	if config.Manifest.UI.Sidebar[0].Kind != connectors.PanelTools || config.Manifest.UI.Sidebar[1].Kind != connectors.PanelActions {
-		t.Fatalf("Ornithopter does not expose tools and actions panels: %#v", config.Manifest.UI.Sidebar)
+		t.Fatalf("showcase does not expose both sidebar capabilities: %#v", config.Manifest.UI.Sidebar)
 	}
-	if len(config.Actions) == 0 {
-		t.Fatal("Ornithopter config has no actions")
+	if config.Manifest.UI.Main[0].Kind != connectors.PanelSummary || config.Manifest.UI.Main[1].Kind != connectors.PanelActionOutput {
+		t.Fatalf("showcase does not expose both main capabilities: %#v", config.Manifest.UI.Main)
+	}
+	if len(config.Tools) != 3 || len(config.Actions) != 5 {
+		t.Fatalf("showcase surface = %d tools/%d actions, want 3/5", len(config.Tools), len(config.Actions))
+	}
+	static, commands := 0, 0
+	for _, action := range config.Actions {
+		if action.Output != "" {
+			static++
+		}
+		if action.Command != "" {
+			commands++
+		}
+	}
+	if static != 1 || commands != 4 {
+		t.Fatalf("showcase does not cover static and command actions: static=%d command=%d", static, commands)
 	}
 }
 
@@ -74,6 +89,38 @@ func TestRunEndpointAcceptsOnlyAdvertisedActions(t *testing.T) {
 	handler(config).ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("ambiguous action request returned %d", response.Code)
+	}
+}
+
+func TestStaticActionReturnsConfiguredOutputWithoutAProcess(t *testing.T) {
+	config := testConfiguration()
+	config.Actions[0].Command = ""
+	config.Actions[0].Output = "portable guide\n"
+	request := httptest.NewRequest(http.MethodPost, "/v1/run", bytes.NewBufferString(`{"action_id":"check"}`))
+	response := httptest.NewRecorder()
+	handler(config).ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("static action returned %d", response.Code)
+	}
+	var result connectors.RunResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Output != "portable guide\n" || result.Error != "" || result.ExitCode != 0 {
+		t.Fatalf("unexpected static action response: %#v", result)
+	}
+}
+
+func TestActionRequiresExactlyOneImplementation(t *testing.T) {
+	for _, action := range []ActionSpec{
+		{Action: connectors.Action{ID: "empty", Name: "Empty"}},
+		{Action: connectors.Action{ID: "both", Name: "Both"}, Command: "true", Output: "text"},
+	} {
+		config := testConfiguration()
+		config.Actions = []ActionSpec{action}
+		if _, err := LoadConfig(writeConfig(t, config)); err == nil || !strings.Contains(err.Error(), "exactly one") {
+			t.Fatalf("invalid action implementation was accepted: %#v, %v", action, err)
+		}
 	}
 }
 

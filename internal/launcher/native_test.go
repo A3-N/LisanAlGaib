@@ -20,6 +20,7 @@ func TestNativeConnectorsUseEphemeralEndpointsAndStop(t *testing.T) {
 	profile := appconfig.ProfileFromPreset(appconfig.Presets[0], time.Now())
 	profile.ID = "native-test"
 	profile.Connectors = profile.Connectors[:1]
+	profile.Connectors[0].Enabled = true
 	originalEndpoint := profile.Connectors[0].Endpoint
 	ctx, cancel := context.WithCancel(context.Background())
 	active, runtime, err := StartNativeConnectors(ctx, root, profile, io.Discard)
@@ -38,8 +39,12 @@ func TestNativeConnectorsUseEphemeralEndpointsAndStop(t *testing.T) {
 		t.Fatal("native endpoint mutated the saved Docker profile")
 	}
 	manifest, err := connectors.FetchManifest(context.Background(), endpoint)
-	if err != nil || manifest.ID != "host-check" {
+	if err != nil || manifest.ID != "ixian-proving-ground" {
 		t.Fatalf("native extension was not reachable: manifest=%#v err=%v", manifest, err)
+	}
+	result, err := connectors.RunAction(context.Background(), endpoint, "tui-tour")
+	if err != nil || !strings.Contains(result.Output, "STATIC ACTION") {
+		t.Fatalf("native extension action was not usable through the main protocol: result=%#v err=%v", result, err)
 	}
 
 	cancel()

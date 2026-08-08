@@ -1,0 +1,45 @@
+#!/bin/sh
+set -eu
+
+case "${1:-}" in
+  context)
+    printf '%s\n' 'IXIAN PROVING GROUND // SIDECAR CONTEXT'
+    printf 'identity    '
+    id
+    printf 'kernel      '
+    uname -srm
+    printf 'hostname    %s\n' "$(hostname)"
+    printf 'working dir %s\n' "$PWD"
+    printf 'home        %s\n' "$HOME"
+    printf 'write test  '
+    if touch /ixian-root-write 2>/dev/null; then
+      printf '%s\n' 'unexpectedly writable'
+      rm -f /ixian-root-write
+    else
+      printf '%s\n' 'blocked by read-only root filesystem'
+    fi
+    ;;
+  health)
+    printf '%s\n' 'IXIAN PROVING GROUND // PRIVATE SERVICE CALL'
+    exec curl -fsS http://127.0.0.1:7777/v1/health
+    ;;
+  viewport)
+    printf '%s\n' 'IXIAN PROVING GROUND // VIEWPORT OUTPUT'
+    line=1
+    while [ "$line" -le 40 ]; do
+      printf 'row %02d · extension-owned output for vertical scrolling\n' "$line"
+      line=$((line + 1))
+    done
+    printf '%s\n' 'wide >>> 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz <<< end'
+    ;;
+  failure)
+    printf '%s\n' 'IXIAN PROVING GROUND // EXPECTED FAILURE'
+    printf '%s\n' 'stdout remains visible'
+    printf '%s\n' 'stderr is captured with stdout' >&2
+    exit 7
+    ;;
+  *)
+    printf '%s\n' 'unknown allowlisted operation' >&2
+    exit 64
+    ;;
+esac

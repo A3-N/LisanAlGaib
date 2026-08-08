@@ -64,6 +64,10 @@ func (m *Model) handleTerminalStarted(msg terminalStartedMsg) tea.Cmd {
 		previous.Close()
 	}
 	m.sessions[msg.ID] = msg.Session
+	if msg.ID == shellSessionID {
+		m.terminalScrollY = 0
+		m.terminalScrollback = msg.Session.ScrollbackLen()
+	}
 	if m.currentSessionID() == msg.ID {
 		m.capture = true
 		m.focusSidebar = false
@@ -82,7 +86,14 @@ func (m *Model) handleTerminalEvent(msg terminalEventMsg) tea.Cmd {
 		return nil
 	}
 	if msg.Event.Kind == terminalhost.FrameEvent {
+		if msg.ID == shellSessionID {
+			m.syncTerminalVerticalScroll(msg.Session)
+		}
 		return waitTerminalCmd(msg.Session)
+	}
+	if msg.ID == shellSessionID {
+		m.terminalScrollY = 0
+		m.terminalScrollback = 0
 	}
 	if msg.ID == editorSessionID {
 		m.editorPath = ""
@@ -237,27 +248,12 @@ func (m *Model) resolveEditorPath(path string) (string, bool) {
 	if resolved, safe := files.ResolveWithin(m.root, path); safe {
 		return resolved, true
 	}
-	// Indexed skill manifests may live in explicitly allowlisted user/admin
-	// roots outside the selected project. Only an exact indexed regular file is
-	// accepted through this second path.
-	if _, indexed := m.findSkill(path); !indexed {
-		return "", false
-	}
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil || !regularFile(resolved) {
-		return "", false
-	}
-	return resolved, true
+	return "", false
 }
 
 func vimEditCommand(path string) string {
 	encoded := hex.EncodeToString([]byte(path))
 	return "\x1b:lua local h='" + encoded + "'; local p=h:gsub('..',function(x) return string.char(tonumber(x,16)) end); vim.cmd('edit '..vim.fn.fnameescape(p))\r"
-}
-
-func regularFile(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.Mode().IsRegular()
 }
 
 func directory(path string) bool {
@@ -433,7 +429,64 @@ func (m *Model) resizeSession(session *terminalhost.Session) {
 func (m *Model) resizeVisibleSession() {
 	if session, _ := m.visibleSession(); session != nil {
 		m.resizeSession(session)
+		if session.ID() == shellSessionID {
+			m.syncTerminalVerticalScroll(session)
+		}
 	}
+	m.clampExtensionScroll()
+}
+
+func (m *Model) syncTerminalVerticalScroll(session *terminalhost.Session) {
+	if session == nil || session.ID() != shellSessionID {
+		return
+	}
+	limit := session.ScrollbackLen()
+	if m.terminalScrollY > 0 && limit > m.terminalScrollback {
+		m.terminalScrollY += limit - m.terminalScrollback
+	}
+	m.terminalScrollY = min(max(m.terminalScrollY, 0), limit)
+	m.terminalScrollback = limit
+}
+
+// scrollTerminalVertically uses a bottom-relative offset: positive values move
+// into history and negative values move back toward the live prompt.
+func (m *Model) scrollTerminalVertically(delta int) bool {
+	if m.page != pageTerminal {
+		return false
+	}
+	session := m.sessions[shellSessionID]
+	if session == nil {
+		return false
+	}
+	limit := session.ScrollbackLen()
+	previous := m.terminalScrollY
+	m.terminalScrollY = min(max(m.terminalScrollY+delta, 0), limit)
+	m.terminalScrollback = limit
+	if limit == 0 && previous == 0 {
+		// Let an alternate-screen program receive the wheel itself.
+		return false
+	}
+	m.status = fmt.Sprintf("Terminal history %d/%d · Home/End jumps", m.terminalScrollY, limit)
+	return true
+}
+
+func (m *Model) moveTerminalVertically(toBottom bool) bool {
+	if m.page != pageTerminal {
+		return false
+	}
+	limit := 0
+	if session := m.sessions[shellSessionID]; session != nil {
+		limit = session.ScrollbackLen()
+	}
+	if toBottom {
+		m.terminalScrollY = 0
+		m.status = "Terminal returned to live output"
+	} else {
+		m.terminalScrollY = limit
+		m.status = "Terminal history top"
+	}
+	m.terminalScrollback = limit
+	return true
 }
 
 func (m *Model) forwardMouse(message tea.MouseMsg) tea.Cmd {
@@ -455,6 +508,11 @@ func (m *Model) forwardMouse(message tea.MouseMsg) tea.Cmd {
 	width, height := m.embeddedDimensions()
 	if local.X < 0 || local.X >= width || local.Y < 0 || local.Y >= height {
 		return nil
+	}
+	if session.ID() == shellSessionID {
+		if m.terminalScrollY > 0 {
+			return nil
+		}
 	}
 	switch message.(type) {
 	case tea.MouseClickMsg:
@@ -485,14 +543,26 @@ func (m *Model) embeddedContent(t theme.Theme, width, height int) (string, bool)
 	if childTitle := session.Title(); childTitle != "" && childTitle != title {
 		title += " · " + childTitle
 	}
+	screen := session.Render()
+	if session.ID() == shellSessionID {
+		var effective, limit int
+		screen, effective, limit = session.RenderViewport(m.terminalScrollY)
+		m.terminalScrollY = effective
+		m.terminalScrollback = limit
+	}
 	header := fmt.Sprintf(" %s  [%s]  Ctrl-G toggles wrapper control", title, mode)
+	if session.ID() == shellSessionID {
+		if m.terminalScrollback > 0 {
+			header += fmt.Sprintf("  y:%d/%d", m.terminalScrollY, m.terminalScrollback)
+		}
+	}
 	headerStyle := lipgloss.NewStyle().Width(width).Height(embeddedHeaderHeight).
 		Foreground(lipgloss.Color(t.Primary)).Background(lipgloss.Color(t.Panel)).Bold(true)
 	background := session.BackgroundColor()
 	if background == nil {
 		background = lipgloss.Color(t.Background)
 	}
-	terminalScreen := renderTerminalScreen(session.Render(), background, width, height-embeddedHeaderHeight)
+	terminalScreen := renderTerminalScreen(screen, background, width, height-embeddedHeaderHeight)
 	content := lipgloss.JoinVertical(lipgloss.Left, headerStyle.Render(trimRunes(header, width)), terminalScreen)
 	return content, true
 }
@@ -513,7 +583,7 @@ func renderTerminalScreen(screen string, background color.Color, width, height i
 	for index := range rows {
 		line := ""
 		if index < len(lines) {
-			line = ansi.Truncate(lines[index], width, "")
+			line = ansi.Cut(lines[index], 0, width)
 		}
 		padding := strings.Repeat(" ", max(width-ansi.StringWidth(line), 0))
 		rows[index] = backgroundSequence + line
@@ -527,7 +597,7 @@ func renderTerminalScreen(screen string, background color.Color, width, height i
 }
 
 func (m *Model) embeddedCursor() *tea.Cursor {
-	session, _ := m.visibleSession()
+	session, id := m.visibleSession()
 	if session == nil || !m.capture {
 		return nil
 	}
@@ -539,10 +609,21 @@ func (m *Model) embeddedCursor() *tea.Cursor {
 		return nil
 	}
 	x := cursor.X
+	y := cursor.Y
+	if id == shellSessionID {
+		y += m.terminalScrollY
+		width, height := m.embeddedDimensions()
+		if x < 0 || x >= width {
+			return nil
+		}
+		if y < 0 || y >= height {
+			return nil
+		}
+	}
 	if m.sidebarDrawn() {
 		x += sidebarWidth
 	}
-	y := m.topHeight() + embeddedHeaderHeight + cursor.Y
+	y += m.topHeight() + embeddedHeaderHeight
 	result := tea.NewCursor(x, y)
 	result.Blink = cursor.Blink
 	result.Color = cursor.Color

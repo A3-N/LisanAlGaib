@@ -10,16 +10,5 @@ fi
 
 docker compose --project-directory "$project_root" -f "$project_root/compose.yaml" build --pull
 docker compose --project-directory "$project_root" -f "$project_root/compose.yaml" up -d --force-recreate workspace
-docker build --pull \
-	--file "$project_root/docker/connectors/host-check/Dockerfile" \
-	--tag lisanalgaib/host-check:1 \
-	"$project_root"
 
-if docker container inspect lisan-host-check >/dev/null 2>&1; then
-	owner=$(docker container inspect --format '{{index .Config.Labels "io.lisanalgaib.connector"}}' lisan-host-check)
-	if [ "$owner" = host-check ]; then
-		docker container rm --force lisan-host-check >/dev/null
-	fi
-fi
-
-printf '%s\n' "Sietch Tabr and Ornithopter images rebuilt. The next launch recreates the example extension."
+printf '%s\n' "Sietch Tabr rebuilt. Disabled extensions remain unbuilt until selected in config."

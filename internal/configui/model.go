@@ -29,13 +29,19 @@ const (
 const contentStart = 6
 
 var dropdowns = []string{
+	"agents",
 	"presets",
 	"profiles",
 	"features",
-	"tools",
-	"agents",
 	"connectors",
 	"terminal-docker-shell",
+	"tools",
+}
+
+var expandedByDefault = map[string]bool{
+	"agents":     true,
+	"connectors": true,
+	"tools":      true,
 }
 
 type row struct {
@@ -72,13 +78,13 @@ func New(document appconfig.Document, path string) *Model {
 	}
 	expanded := make(map[string]bool, len(dropdowns))
 	for _, id := range dropdowns {
-		expanded[id] = true
+		expanded[id] = expandedByDefault[id]
 	}
 	model := &Model{
 		document: document, path: path, working: active.Clone(),
 		source: "profile:" + active.ID, expanded: expanded,
 		width: 100, height: 36,
-		status: "Space selects or toggles · Enter saves and activates · Esc cancels",
+		status: "Enter/Space selects or toggles · Ctrl-S saves and activates · Esc cancels",
 	}
 	model.cursor = model.clampIndex(0)
 	return model
@@ -121,9 +127,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		case "G", "shift+g", "end":
 			m.cursor = m.clampIndex(len(m.rows()) - 1)
 			m.clampScroll()
-		case " ", "space":
+		case " ", "space", "enter":
 			return m, m.activate(m.cursor)
-		case "enter", "ctrl+s":
+		case "ctrl+s":
 			return m, m.save()
 		case "1", "2", "3", "4":
 			index := int(msg.String()[0] - '1')
@@ -153,6 +159,8 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) rows() []row {
 	var rows []row
 
+	rows = m.appendOptions(rows, "agents", "MENTATS", appconfig.Agents)
+
 	presets := make([]row, 0, len(appconfig.Presets))
 	for index, preset := range appconfig.Presets {
 		presets = append(presets, row{kind: rowPreset, label: fmt.Sprintf("%d  %s", index+1, preset.Name), description: preset.Description, preset: index})
@@ -166,23 +174,7 @@ func (m *Model) rows() []row {
 	}
 	rows = m.appendDropdown(rows, "profiles", "SAVED PROFILES", profiles)
 
-	for _, category := range []struct {
-		id       string
-		label    string
-		category appconfig.Category
-	}{
-		{"features", "FEATURES", appconfig.Features},
-		{"tools", "TOOLS", appconfig.Tools},
-		{"agents", "MENTATS", appconfig.Agents},
-	} {
-		var options []row
-		for index, option := range appconfig.Options {
-			if option.Category == category.category {
-				options = append(options, row{kind: rowOption, label: option.Label, description: option.Description, option: index})
-			}
-		}
-		rows = m.appendDropdown(rows, category.id, category.label, options)
-	}
+	rows = m.appendOptions(rows, "features", "FEATURES", appconfig.Features)
 
 	connectors := make([]row, 0, len(m.working.Connectors))
 	for index, connector := range m.working.Connectors {
@@ -199,7 +191,19 @@ func (m *Model) rows() []row {
 	} {
 		dockerShells = append(dockerShells, row{kind: rowTerminal, label: option.value, description: option.description, setting: "docker-shell", value: option.value})
 	}
-	return m.appendDropdown(rows, "terminal-docker-shell", "SIETCH TABR SHELL", dockerShells)
+	rows = m.appendDropdown(rows, "terminal-docker-shell", "SIETCH TABR SHELL", dockerShells)
+
+	return m.appendOptions(rows, "tools", "TOOLS", appconfig.Tools)
+}
+
+func (m *Model) appendOptions(rows []row, id, label string, category appconfig.Category) []row {
+	var options []row
+	for index, option := range appconfig.Options {
+		if option.Category == category {
+			options = append(options, row{kind: rowOption, label: option.Label, description: option.Description, option: index})
+		}
+	}
+	return m.appendDropdown(rows, id, label, options)
 }
 
 func (m *Model) appendDropdown(rows []row, id, label string, children []row) []row {
@@ -239,7 +243,7 @@ func (m *Model) activate(index int) tea.Cmd {
 		profile := m.document.Profiles[selected.profile]
 		m.working = profile.Clone()
 		m.source = "profile:" + profile.ID
-		m.status = profile.Name + " loaded; press Enter to save and activate"
+		m.status = profile.Name + " loaded; press Ctrl-S to save and activate"
 	case rowOption:
 		option := appconfig.Options[selected.option]
 		enabled := !m.working.Enabled(option.Category, option.ID)
@@ -288,7 +292,7 @@ func (m *Model) applyPreset(index int) {
 		m.working.Connectors = append(m.working.Connectors, connector)
 	}
 	m.source = "preset:" + preset.ID
-	m.status = preset.Name + " loaded; press Enter to save and activate"
+	m.status = preset.Name + " loaded; press Ctrl-S to save and activate"
 }
 
 func (m *Model) save() tea.Cmd {
@@ -341,7 +345,7 @@ func (m *Model) View() tea.View {
 		base.Width(m.width).Render(fit("  Active  " + active.Name + "  ·  Working  " + m.working.Signature())),
 		base.Width(m.width).Render(fit("  Sietch Tabr  " + m.working.Terminal.DockerUser + "@tabr:" + m.working.Terminal.DockerWorkdir + " · shell=" + m.working.Terminal.DockerShell + " · host terminal stays current · host shell uses the system default")),
 		base.Width(m.width).Foreground(lipgloss.Color(t.Muted)).Render(fit("  ■/□ multiple choice · ●/○ one choice · ▾/▸ dropdown")),
-		base.Width(m.width).Foreground(lipgloss.Color(t.Muted)).Render(fit("  ↑/↓ or mouse · Space select/toggle · Enter save + activate · Esc cancel")),
+		base.Width(m.width).Foreground(lipgloss.Color(t.Muted)).Render(fit("  ↑/↓ or mouse · Enter/Space select or toggle · Ctrl-S save + activate · Esc cancel")),
 	}
 	rows := m.rows()
 	end := min(m.scroll+m.visibleRows(), len(rows))

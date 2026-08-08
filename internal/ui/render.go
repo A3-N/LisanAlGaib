@@ -142,7 +142,7 @@ func (m *Model) renderSidebar(t theme.Theme, height int) string {
 			label += " " + row.Subtitle
 		}
 		style := lipgloss.NewStyle().Width(sidebarWidth - 1).Foreground(lipgloss.Color(t.Text)).Background(lipgloss.Color(t.Surface))
-		if index == m.sidebarCursor && row.Kind != rowInfo {
+		if index == m.sidebarCursor {
 			style = style.Background(lipgloss.Color(t.Selection)).Foreground(lipgloss.Color(t.Primary)).Bold(m.focusSidebar)
 		}
 		lines = append(lines, style.Render(trimRunes(label, sidebarWidth-3)))
@@ -167,8 +167,6 @@ func (m *Model) renderMain(t theme.Theme, width, height int) string {
 			lines = m.toolLines()
 		case pageAgent:
 			lines = m.agentLines()
-		case pageSkill:
-			lines = m.skillLines()
 		case pageTerminal:
 			lines = m.terminalLines()
 		case pageConnector:
@@ -178,6 +176,13 @@ func (m *Model) renderMain(t theme.Theme, width, height int) string {
 	if len(lines) == 0 {
 		lines = []string{"", "  Nothing selected."}
 	}
+	if m.page == pageConnector {
+		lines = wrapExtensionLines(lines, max(width-1, 1))
+		m.extensionScrollY = min(max(m.extensionScrollY, 0), max(len(lines)-height, 0))
+		if m.extensionScrollY > 0 {
+			lines = lines[m.extensionScrollY:]
+		}
+	}
 	for len(lines) < height {
 		lines = append(lines, "")
 	}
@@ -186,14 +191,37 @@ func (m *Model) renderMain(t theme.Theme, width, height int) string {
 	}
 	style := lipgloss.NewStyle().Width(width).Height(height).Foreground(lipgloss.Color(t.Text)).Background(lipgloss.Color(t.Background))
 	var rendered []string
+	contentWidth := max(width-1, 1)
 	for _, line := range lines {
-		rendered = append(rendered, style.Width(width).Height(1).Render(trimRunes(line, max(width-1, 1))))
+		visible := trimRunes(line, contentWidth)
+		rendered = append(rendered, style.Width(width).Height(1).Render(visible))
 	}
 	return strings.Join(rendered, "\n")
 }
 
+func (m *Model) wrappedConnectorLines(width int) []string {
+	return wrapExtensionLines(m.connectorLines(), width)
+}
+
+func wrapExtensionLines(lines []string, width int) []string {
+	width = max(width, 1)
+	wrapped := make([]string, 0, len(lines))
+	for _, line := range lines {
+		wrapped = append(wrapped, strings.Split(ansi.Hardwrap(line, width, true), "\n")...)
+	}
+	return wrapped
+}
+
 func (m *Model) overviewLines(_ theme.Theme, width, height int) []string {
-	art := fitASCII(overviewASCII, max(width-4, 1), max(height-2, 1))
+	availableWidth := max(width-4, 1)
+	availableHeight := max(height-2, 1)
+	artwork, ok := overviewArtworkForViewport(availableWidth, availableHeight)
+	if !ok {
+		// Keep Overview intentionally empty when even a centered banner crop
+		// would be reduced to an unrecognizable fragment.
+		return []string{""}
+	}
+	art := artwork.crop(availableWidth, availableHeight)
 	lines := make([]string, 0, height)
 	for index := 0; index < max((height-len(art))/2, 0); index++ {
 		lines = append(lines, "")
@@ -209,54 +237,69 @@ func (m *Model) overviewLines(_ theme.Theme, width, height int) []string {
 	return lines
 }
 
-func fitASCII(value string, width, height int) []string {
-	source := strings.Split(strings.TrimRight(value, "\n"), "\n")
-	if len(source) == 0 || width <= 0 || height <= 0 {
-		return nil
-	}
-	sourceWidth := 0
-	canvas := make([][]rune, len(source))
-	for index, sourceLine := range source {
-		canvas[index] = []rune(sourceLine)
-		sourceWidth = max(sourceWidth, len(canvas[index]))
-	}
-	if sourceWidth == 0 {
-		return nil
-	}
-	for index, sourceLine := range canvas {
-		if padding := sourceWidth - len(sourceLine); padding > 0 {
-			canvas[index] = append(sourceLine, []rune(strings.Repeat(" ", padding))...)
-		}
-	}
-	targetWidth := min(sourceWidth, width)
-	targetHeight := min(len(source), height)
-	result := make([]string, 0, targetHeight)
-	for targetY := 0; targetY < targetHeight; targetY++ {
-		sourceY := targetY
-		if targetHeight < len(source) && targetHeight > 1 {
-			sourceY = targetY * (len(source) - 1) / (targetHeight - 1)
-		}
-		line := canvas[sourceY]
-		if sourceWidth > targetWidth {
-			resized := make([]rune, targetWidth)
-			for targetX := range resized {
-				resized[targetX] = line[targetX*sourceWidth/targetWidth]
-			}
-			line = resized
-		}
-		result = append(result, string(line))
-	}
-	return result
+// Retain the previous compact layout's legibility floor, but crop the banner
+// at every visible size so Overview has one consistent source image.
+const (
+	overviewMinimumWidth  = 59
+	overviewMinimumHeight = 19
+)
+
+type asciiArtwork struct {
+	rows   [][]rune
+	width  int
+	height int
 }
 
-func onlineConnectors(states []connectorapi.State) int {
-	count := 0
-	for _, state := range states {
-		if state.Online {
-			count++
+var overviewBanner = newASCIIArtwork(overviewBannerASCII)
+
+func newASCIIArtwork(value string) asciiArtwork {
+	value = strings.TrimRight(value, "\r\n")
+	if value == "" {
+		return asciiArtwork{}
+	}
+
+	source := strings.Split(value, "\n")
+	artwork := asciiArtwork{height: len(source)}
+	for index, line := range source {
+		source[index] = strings.TrimSuffix(line, "\r")
+		artwork.width = max(artwork.width, len([]rune(source[index])))
+	}
+	if artwork.width == 0 {
+		return asciiArtwork{}
+	}
+
+	artwork.rows = make([][]rune, artwork.height)
+	for index, line := range source {
+		artwork.rows[index] = []rune(line)
+		if padding := artwork.width - len(artwork.rows[index]); padding > 0 {
+			artwork.rows[index] = append(artwork.rows[index], []rune(strings.Repeat(" ", padding))...)
 		}
 	}
-	return count
+	return artwork
+}
+
+func overviewArtworkForViewport(width, height int) (asciiArtwork, bool) {
+	visible := overviewBanner.width > 0 && overviewBanner.height > 0 &&
+		width >= overviewMinimumWidth && height >= overviewMinimumHeight
+	return overviewBanner, visible
+}
+
+func (artwork asciiArtwork) crop(width, height int) []string {
+	if artwork.width == 0 || artwork.height == 0 || width <= 0 || height <= 0 {
+		return nil
+	}
+	targetWidth := min(width, artwork.width)
+	targetHeight := min(height, artwork.height)
+	startX := (artwork.width - targetWidth) / 2
+	// Preserve more of the lower subject when height is constrained: remove
+	// roughly three rows above for every row removed below.
+	startY := (artwork.height - targetHeight) * 3 / 4
+
+	result := make([]string, 0, targetHeight)
+	for row := startY; row < startY+targetHeight; row++ {
+		result = append(result, string(artwork.rows[row][startX:startX+targetWidth]))
+	}
+	return result
 }
 
 func (m *Model) fileLines(_, _ int) []string {
@@ -329,27 +372,6 @@ func (m *Model) agentLines() []string {
 	}
 	lines = append(lines, "", "  API keys are never displayed or copied into Lisan state.", "  The native CLI owns its login flow and credential files.", "", "  Docs: "+tool.Docs)
 	return lines
-}
-
-func (m *Model) skillLines() []string {
-	skill, ok := m.findSkill(m.selectedSkill)
-	if !ok {
-		return []string{"", "  Select a skill from the left."}
-	}
-	valid := "valid"
-	if !skill.Valid {
-		valid = "invalid: " + displayText(skill.Error)
-	}
-	return []string{
-		"", "   " + skill.Name, "  [ Open SKILL.md in embedded NvChad: Enter ]", "",
-		"  " + skill.Description, "",
-		"  Provider     " + skill.Provider,
-		"  Scope        " + skill.Scope,
-		"  Validation   " + valid,
-		"  Path         " + displayText(skill.Path),
-		"",
-		"  The index scans allowlisted provider roots and ignores caches.",
-	}
 }
 
 func (m *Model) terminalLines() []string {
@@ -427,6 +449,7 @@ func (m *Model) extensionSummaryLines(state connectorapi.State) []string {
 		fmt.Sprintf("  Tools        %d", len(state.Manifest.Tools)),
 		fmt.Sprintf("  Actions      %d", len(state.Manifest.Actions)),
 		"", "  Select an action on the left and press Enter or click it.",
+		"  Output wraps to the pane; Wheel or j/k scrolls vertically.",
 	}
 }
 
@@ -452,17 +475,16 @@ func (m *Model) helpLines() []string {
 		"", "  HELP // KEYBOARD & MOUSE", "  " + strings.Repeat("━", 40), "",
 		"  Mouse        click the top bar, sidebar items, or an embedded pane",
 		"  Re-click     collapse/restore the active sidebar; Extensions toggles its menu",
-		"  Wheel        scroll the sidebar or active embedded application",
+		"  Wheel        vertically scroll Terminal history, extensions, or the sidebar",
 		"  Tab/S-Tab    next/previous top-level page (wrapper mode)",
 		"  Ctrl-G       toggle input between embedded app and wrapper",
 		"  Ctrl-B       collapse/expand sidebar",
 		"  h / l        focus sidebar / main pane",
-		"  j / k        move or scroll",
-		"  g / G        first/top or last/bottom",
+		"  j / k        move or vertically scroll",
+		"  g / G        first/top or last/bottom; PgUp/PgDn scroll a page",
 		"  Enter/Space  expand a category or activate the selected item",
-		"  e            open a selected skill in embedded NvChad",
 		"  F2           cycle colour theme",
-		"  r            dynamically rescan tools, apt and skills",
+		"  r            dynamically rescan configured inventory",
 		"  Esc          close help or return to overview",
 		"  Ctrl-C       quit",
 		"", "  Press ? or Esc to return.",

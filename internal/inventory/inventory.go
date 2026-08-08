@@ -68,7 +68,47 @@ var specs = []spec{
 	{Tool: Tool{ID: "node", Name: "Node.js", Category: "Language Runtimes", Command: "node", Description: "JavaScript runtime"}, VersionArgs: []string{"--version"}},
 	{Tool: Tool{ID: "npm", Name: "npm", Category: "Language Runtimes", Command: "npm", Description: "JavaScript package manager"}, VersionArgs: []string{"--version"}},
 	{Tool: Tool{ID: "go", Name: "Go", Category: "Language Runtimes", Command: "go", Description: "Go compiler and toolchain"}, VersionArgs: []string{"version"}},
-	{Tool: Tool{ID: "python", Name: "Python", Category: "Language Runtimes", Command: "python3", Description: "Python 3 runtime"}, VersionArgs: []string{"--version"}},
+	{Tool: Tool{ID: "python", Name: "Python", Category: "Language Runtimes", Command: windowsCommand("python3", "python"), Description: "Python 3 runtime"}, VersionArgs: []string{"--version"}},
+	{Tool: Tool{ID: "pip", Name: "pip", Category: "Language Runtimes", Command: windowsCommand("pip3", "pip"), Description: "Python package manager"}, VersionArgs: []string{"--version"}},
+	{Tool: Tool{ID: "rust", Name: "Rust", Category: "Language Runtimes", Command: "rustc", Description: "Rust compiler"}, VersionArgs: []string{"--version"}},
+	{Tool: Tool{ID: "java", Name: "Java JDK", Category: "Language Runtimes", Command: "javac", Description: "Java compiler and runtime"}, VersionArgs: []string{"--version"}},
+	{Tool: Tool{ID: "clang", Name: "Clang", Category: "Language Runtimes", Command: "clang", Description: "C and C++ compiler toolchain"}, VersionArgs: []string{"--version"}},
+	{Tool: Tool{ID: "ruby", Name: "Ruby", Category: "Language Runtimes", Command: "ruby", Description: "Ruby runtime"}, VersionArgs: []string{"--version"}},
+	{Tool: Tool{ID: "php", Name: "PHP", Category: "Language Runtimes", Command: "php", Description: "PHP command-line runtime"}, VersionArgs: []string{"--version"}},
+	{Tool: Tool{ID: "lua", Name: "Lua", Category: "Language Runtimes", Command: "lua", Description: "Lua runtime"}, VersionArgs: []string{"-v"}},
+	{Tool: Tool{ID: "curl", Name: "curl", Category: "Utilities", Command: "curl", Description: "HTTP and data-transfer client"}, VersionArgs: []string{"--version"}},
+	{Tool: Tool{ID: "jq", Name: "jq", Category: "Utilities", Command: "jq", Description: "JSON query and transformation tool"}, VersionArgs: []string{"--version"}},
+	{Tool: Tool{ID: "wget", Name: "wget", Category: "Utilities", Command: "wget", Description: "Non-interactive network downloader"}, VersionArgs: []string{"--version"}},
+	{Tool: Tool{ID: "zip", Name: "zip", Category: "Utilities", Command: "zip", Description: "ZIP archive creator"}, VersionArgs: []string{"-v"}},
+	{Tool: Tool{ID: "fd", Name: "fd", Category: "Utilities", Command: linuxCommand("fdfind", "fd"), Description: "Fast filesystem search"}, VersionArgs: []string{"--version"}},
+	{Tool: Tool{ID: "fzf", Name: "fzf", Category: "Utilities", Command: "fzf", Description: "Fuzzy finder"}, VersionArgs: []string{"--version"}},
+	{Tool: Tool{ID: "bat", Name: "bat", Category: "Utilities", Command: linuxCommand("batcat", "bat"), Description: "Syntax-highlighted file viewer"}, VersionArgs: []string{"--version"}},
+	{Tool: Tool{ID: "tree", Name: "tree", Category: "Utilities", Command: "tree", Description: "Directory tree viewer"}, VersionArgs: []string{"--version"}},
+	{Tool: Tool{ID: "shellcheck", Name: "ShellCheck", Category: "Utilities", Command: "shellcheck", Description: "Shell script static analysis"}, VersionArgs: []string{"--version"}},
+	{Tool: Tool{ID: "ip", Name: "IProute2", Category: "Networking", Command: windowsCommand("ip", "ipconfig"), Description: "IP address and route inspection"}, VersionArgs: []string{"-Version"}},
+	{Tool: Tool{ID: "ping", Name: "Ping", Category: "Networking", Command: "ping", Description: "ICMP reachability checks"}, VersionArgs: []string{"--help"}},
+	{Tool: Tool{ID: "dns", Name: "DNS utilities", Category: "Networking", Command: windowsCommand("dig", "nslookup"), Description: "DNS lookup and diagnostics"}, VersionArgs: []string{"-v"}},
+	{Tool: Tool{ID: "net-tools", Name: "Net-tools", Category: "Networking", Command: windowsCommand("ifconfig", "netstat"), Description: "Interface and connection inspection"}, VersionArgs: []string{"--help"}},
+	{Tool: Tool{ID: "traceroute", Name: "Traceroute", Category: "Networking", Command: windowsCommand("traceroute", "tracert"), Description: "Network path tracing"}, VersionArgs: []string{"--version"}},
+	{Tool: Tool{ID: "netcat", Name: "Netcat", Category: "Networking", Command: windowsCommand("nc", "ncat"), Description: "TCP and UDP diagnostics"}, VersionArgs: []string{"-h"}},
+	{Tool: Tool{ID: "nmap", Name: "Nmap", Category: "Networking", Command: "nmap", Description: "Network discovery and port scanning"}, VersionArgs: []string{"--version"}},
+	{Tool: Tool{ID: "mtr", Name: "MTR", Category: "Networking", Command: windowsCommand("mtr", "pathping"), Description: "Route and latency diagnostics"}, VersionArgs: []string{"--version"}},
+	{Tool: Tool{ID: "tcpdump", Name: "tcpdump", Category: "Networking", Command: windowsCommand("tcpdump", "pktmon"), Description: "Packet capture and inspection"}, VersionArgs: []string{"--version"}},
+	{Tool: Tool{ID: "whois", Name: "Whois", Category: "Networking", Command: "whois", Description: "Domain and network registration lookup"}, VersionArgs: []string{"--version"}},
+}
+
+func windowsCommand(unix, windows string) string {
+	if runtime.GOOS == "windows" {
+		return windows
+	}
+	return unix
+}
+
+func linuxCommand(linux, other string) string {
+	if runtime.GOOS == "linux" {
+		return linux
+	}
+	return other
 }
 
 func ScanSelected(ctx context.Context, selection Selection) Snapshot {

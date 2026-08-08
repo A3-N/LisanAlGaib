@@ -10,9 +10,9 @@ import (
 )
 
 func TestConnectorRunIsPrivateAndRestricted(t *testing.T) {
-	connector := appconfig.ConnectorConfig{ID: "host-check", Container: "lisan-host-check", User: "10001:10001", Network: "arrakis-shield-wall", Image: "fixture:1", Managed: true}
+	connector := appconfig.ConnectorConfig{ID: "ixian-proving-ground", Container: "lisan-ixian-proving-ground", User: "10001:10001", Network: "arrakis-shield-wall", Image: "fixture:1", Managed: true}
 	joined := strings.Join(connectorRunArguments(connector), " ")
-	for _, expected := range []string{"--network arrakis-shield-wall", "--user 10001:10001", "--read-only", "--cap-drop ALL", "no-new-privileges", "io.lisanalgaib.connector=host-check", "io.lisanalgaib.connector-config="} {
+	for _, expected := range []string{"--network arrakis-shield-wall", "--user 10001:10001", "--read-only", "--cap-drop ALL", "no-new-privileges", "io.lisanalgaib.connector=ixian-proving-ground", "io.lisanalgaib.connector-config="} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("connector is missing restriction %q: %s", expected, joined)
 		}

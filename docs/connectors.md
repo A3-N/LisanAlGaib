@@ -8,20 +8,20 @@ rendering; the sidecar owns its tools and predefined actions.
 
 ```json
 {
-  "id": "host-check",
-  "name": "Ornithopter",
-  "icon": "󰒋",
-  "description": "Read-only runtime host diagnostics example",
-  "enabled": true,
+  "id": "ixian-proving-ground",
+  "name": "Ixian Proving Ground",
+  "icon": "󰒓",
+  "description": "Disabled reference sidecar exercising every extension protocol v2 TUI capability",
+  "enabled": false,
   "managed": true,
-  "image": "lisanalgaib/host-check:1",
+  "image": "lisanalgaib/ixian-proving-ground:1",
   "build_context": ".",
-  "dockerfile": "docker/connectors/host-check/Dockerfile",
-  "native_config": "docker/connectors/host-check/extension.json",
-  "container": "lisan-host-check",
+  "dockerfile": "docker/connectors/ixian-proving-ground/Dockerfile",
+  "native_config": "docker/connectors/ixian-proving-ground/extension.json",
+  "container": "lisan-ixian-proving-ground",
   "user": "10001:10001",
   "network": "arrakis-shield-wall",
-  "endpoint": "http://lisan-host-check:7777"
+  "endpoint": "http://lisan-ixian-proving-ground:7777"
 }
 ```
 
@@ -50,25 +50,31 @@ and `sietch-tabr` to `network` but does not start, stop, rebuild, or remove it.
 ```json
 {
   "protocol_version": 2,
-  "id": "host-check",
-  "name": "Ornithopter",
-  "icon": "󰒋",
-  "description": "Read-only runtime host diagnostics example",
+  "id": "ixian-proving-ground",
+  "name": "Ixian Proving Ground",
+  "icon": "󰒓",
+  "description": "Disabled reference sidecar exercising every extension protocol v2 TUI capability",
   "ui": {
-    "sidebar": [{"id": "actions", "title": "Checks", "kind": "actions", "expanded": true}],
-    "main": [{"id": "summary", "title": "Ornithopter", "kind": "summary"}]
+    "sidebar": [
+      {"id": "tools", "title": "Sidecar tools", "kind": "tools", "expanded": true},
+      {"id": "actions", "title": "Capability actions", "kind": "actions", "expanded": true}
+    ],
+    "main": [
+      {"id": "summary", "title": "Protocol surface", "kind": "summary"},
+      {"id": "output", "title": "Action result", "kind": "action-output"}
+    ]
   },
   "tools": [{
-    "id": "uname",
-    "name": "uname",
-    "description": "Operating-system information",
-    "version": "available",
+    "id": "http-client",
+    "name": "curl",
+    "description": "Calls services from the extension network context",
+    "version": "curl 8.x",
     "ready": true
   }],
   "actions": [{
-    "id": "system",
-    "name": "System information",
-    "description": "Show the kernel and architecture"
+    "id": "runtime-context",
+    "name": "Runtime Context",
+    "description": "Run an allowlisted command showing the sidecar process and filesystem context"
   }]
 }
 ```
@@ -81,27 +87,28 @@ offline. Tools and actions come entirely from the manifest.
 `POST /v1/run` accepts only an advertised action ID:
 
 ```json
-{"action_id":"system"}
+{"action_id":"runtime-context"}
 ```
 
 The response is:
 
 ```json
 {
-  "action_id": "system",
-  "output": "Linux host-check 6.x x86_64 GNU/Linux\n",
+  "action_id": "runtime-context",
+  "output": "IXIAN PROVING GROUND // SIDECAR CONTEXT\n",
   "exit_code": 0,
   "duration_ms": 42,
   "error": ""
 }
 ```
 
-Lisan does not send arbitrary shell commands. Connector authors should map IDs
-to fixed executables and argument arrays, set timeouts and output limits, avoid
-shell interpolation, and run as an unprivileged user. Responses are capped at
-1 MiB by the client and control characters are stripped before display. A
-manifest can advertise at most 32 panels in each area, 100 tools, and 100
-actions.
+Lisan does not send arbitrary shell commands. Declarative connector actions may
+map IDs to fixed executables and argument arrays, or return fixed `output`
+without spawning a process. An action must choose exactly one implementation.
+Connector authors should set timeouts and output limits, avoid shell
+interpolation, and run as an unprivileged user. Responses are capped at 1 MiB
+by the client and control characters are stripped before display. A manifest
+can advertise at most 32 panels in each area, 100 tools, and 100 actions.
 
 ## Compatibility
 

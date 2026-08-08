@@ -17,6 +17,7 @@ func TestPresetToggleAndSave(t *testing.T) {
 	document := appconfig.DefaultDocument(time.Now())
 	model := New(document, path)
 	model.applyPreset(3)
+	model.expanded["features"] = true
 	if model.working.Feature("terminal") {
 		t.Fatal("minimal preset must disable terminal")
 	}
@@ -46,32 +47,48 @@ func TestPresetToggleAndSave(t *testing.T) {
 	}
 }
 
-func TestDropdownsStartExpandedAndSpaceCollapsesThem(t *testing.T) {
+func TestDropdownDefaultsAndOrdering(t *testing.T) {
 	model := New(appconfig.DefaultDocument(time.Now()), filepath.Join(t.TempDir(), "config.json"))
 	for _, id := range dropdowns {
-		if !model.expanded[id] {
-			t.Fatalf("dropdown %q did not start expanded", id)
+		if model.expanded[id] != expandedByDefault[id] {
+			t.Fatalf("dropdown %q expanded = %t, want %t", id, model.expanded[id], expandedByDefault[id])
 		}
 	}
 
-	before := len(model.rows())
+	var order []string
+	for _, candidate := range model.rows() {
+		if candidate.kind == rowDropdown {
+			order = append(order, candidate.value)
+		}
+	}
+	want := []string{"agents", "presets", "profiles", "features", "connectors", "terminal-docker-shell", "tools"}
+	if strings.Join(order, ",") != strings.Join(want, ",") {
+		t.Fatalf("dropdown order = %v, want %v", order, want)
+	}
+}
+
+func TestEnterAndSpaceBothActivateFocusedRow(t *testing.T) {
+	model := New(appconfig.DefaultDocument(time.Now()), filepath.Join(t.TempDir(), "config.json"))
 	for index, candidate := range model.rows() {
 		if candidate.kind == rowDropdown && candidate.value == "features" {
 			model.cursor = index
-			model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeySpace, Text: " "}))
 			break
 		}
 	}
-	if model.expanded["features"] {
-		t.Fatal("space did not collapse the focused dropdown")
+
+	model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	if !model.expanded["features"] {
+		t.Fatal("Enter did not expand the focused dropdown")
 	}
-	if after := len(model.rows()); after >= before {
-		t.Fatalf("collapsed dropdown did not hide its rows: before=%d after=%d", before, after)
+	model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeySpace, Text: " "}))
+	if model.expanded["features"] {
+		t.Fatal("Space did not collapse the focused dropdown")
 	}
 }
 
 func TestOnlyDockerShellIsConfigurable(t *testing.T) {
 	model := New(appconfig.DefaultDocument(time.Now()), filepath.Join(t.TempDir(), "config.json"))
+	model.expanded["terminal-docker-shell"] = true
 	choices := map[string]bool{}
 	for _, candidate := range model.rows() {
 		if candidate.kind != rowTerminal {
@@ -95,6 +112,7 @@ func TestOnlyDockerShellIsConfigurable(t *testing.T) {
 func TestConfigUsesSquareCheckboxesAndCircularRadioChoices(t *testing.T) {
 	model := New(appconfig.DefaultDocument(time.Now()), filepath.Join(t.TempDir(), "config.json"))
 	model.applyPreset(3)
+	model.expanded["presets"] = true
 
 	for index, candidate := range model.rows() {
 		if candidate.kind == rowOption {
@@ -115,7 +133,7 @@ func TestConfigUsesSquareCheckboxesAndCircularRadioChoices(t *testing.T) {
 	}
 }
 
-func TestSavedProfileSpaceLoadsAndEnterActivates(t *testing.T) {
+func TestSavedProfileEnterLoadsAndCtrlSSaves(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	document := appconfig.DefaultDocument(time.Now())
 	selection, _ := document.Active()
@@ -123,6 +141,7 @@ func TestSavedProfileSpaceLoadsAndEnterActivates(t *testing.T) {
 	document.SaveSelection(selection, time.Now())
 	initialActive := document.ActiveProfileID
 	model := New(document, path)
+	model.expanded["profiles"] = true
 
 	var target appconfig.Profile
 	for index, candidate := range model.rows() {
@@ -132,7 +151,8 @@ func TestSavedProfileSpaceLoadsAndEnterActivates(t *testing.T) {
 		profile := model.document.Profiles[candidate.profile]
 		if profile.ID != initialActive {
 			target = profile
-			model.activate(index)
+			model.cursor = index
+			model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
 			break
 		}
 	}
@@ -140,10 +160,10 @@ func TestSavedProfileSpaceLoadsAndEnterActivates(t *testing.T) {
 		t.Fatal("test did not find an inactive saved profile")
 	}
 	if model.document.ActiveProfileID != initialActive {
-		t.Fatal("space activated a saved profile before Enter")
+		t.Fatal("Enter activated a saved profile before Ctrl-S")
 	}
 	if model.working.ID != target.ID {
-		t.Fatal("space did not load the saved profile as the working selection")
+		t.Fatal("Enter did not load the saved profile as the working selection")
 	}
 	beforeSignature := model.working.Signature()
 	var beforeIDs []string
@@ -151,9 +171,9 @@ func TestSavedProfileSpaceLoadsAndEnterActivates(t *testing.T) {
 		beforeIDs = append(beforeIDs, profile.ID+":"+profile.Signature())
 	}
 
-	model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	model.Update(tea.KeyPressMsg(tea.Key{Code: 's', Mod: tea.ModCtrl}))
 	if !model.saved || model.document.ActiveProfileID != target.ID {
-		t.Fatalf("Enter did not save and activate the working profile: active=%q target=%q before=%q profiles=%v target-signature=%q working-signature=%q err=%v status=%q", model.document.ActiveProfileID, target.ID, beforeSignature, beforeIDs, target.Signature(), model.working.Signature(), model.err, model.status)
+		t.Fatalf("Ctrl-S did not save and activate the working profile: active=%q target=%q before=%q profiles=%v target-signature=%q working-signature=%q err=%v status=%q", model.document.ActiveProfileID, target.ID, beforeSignature, beforeIDs, target.Signature(), model.working.Signature(), model.err, model.status)
 	}
 	loaded, err := appconfig.Load(path)
 	if err != nil {

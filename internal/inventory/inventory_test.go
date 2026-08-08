@@ -4,12 +4,26 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"lisanalgaib/internal/appconfig"
 )
 
 func TestSafeVersionReadsFirstLine(t *testing.T) {
 	got := safeVersion(context.Background(), "/bin/echo", []string{"version one\x1b\nversion two"})
 	if got != "version one" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestInventoryCoversEverySelectableTool(t *testing.T) {
+	seen := map[string]bool{"nvchad": true}
+	for _, candidate := range specs {
+		seen[candidate.ID] = true
+	}
+	for _, option := range appconfig.Options {
+		if option.Category == appconfig.Tools && !seen[option.ID] {
+			t.Fatalf("selectable tool %q has no inventory probe", option.ID)
+		}
 	}
 }
 

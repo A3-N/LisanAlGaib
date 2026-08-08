@@ -52,12 +52,9 @@ func required(profile appconfig.Profile) []requirement {
 			add(profile.Terminal.DockerShell, profile.Terminal.DockerShell)
 		}
 	}
-	for _, pair := range []struct{ id, command string }{
-		{"git", "git"}, {"rg", "rg"}, {"nvim", "nvim"},
-		{"node", "node"}, {"go", "go"}, {"python", "python3"},
-	} {
-		if profile.Tool(pair.id) {
-			add(pair.id, pair.command)
+	for _, option := range appconfig.Options {
+		if option.Category == appconfig.Tools && profile.Tool(option.ID) {
+			add(option.ID, toolCommand(runtime.GOOS, option.ID))
 		}
 	}
 	if profile.Tool("node") {
@@ -82,6 +79,35 @@ func required(profile appconfig.Profile) []requirement {
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result
+}
+
+func toolCommand(goos, id string) string {
+	common := map[string]string{
+		"git": "git", "rg": "rg", "nvim": "nvim", "node": "node", "go": "go",
+		"rust": "rustc", "java": "javac", "clang": "clang", "ruby": "ruby", "php": "php", "lua": "lua",
+		"curl": "curl", "jq": "jq", "wget": "wget", "zip": "zip", "fzf": "fzf", "tree": "tree",
+		"shellcheck": "shellcheck", "ping": "ping", "traceroute": "traceroute", "nmap": "nmap",
+		"mtr": "mtr", "tcpdump": "tcpdump", "whois": "whois",
+	}
+	commands := map[string]map[string]string{
+		"linux": {
+			"python": "python3", "pip": "pip3", "fd": "fdfind", "bat": "batcat",
+			"ip": "ip", "dns": "dig", "net-tools": "ifconfig", "netcat": "nc",
+		},
+		"darwin": {
+			"python": "python3", "pip": "pip3", "fd": "fd", "bat": "bat",
+			"ip": "ip", "dns": "dig", "net-tools": "ifconfig", "netcat": "nc",
+		},
+		"windows": {
+			"python": "python", "pip": "pip", "fd": "fd", "bat": "bat",
+			"ip": "ipconfig", "dns": "nslookup", "net-tools": "netstat", "traceroute": "tracert",
+			"netcat": "ncat", "mtr": "pathping", "tcpdump": "pktmon",
+		},
+	}
+	if command := commands[goos][id]; command != "" {
+		return command
+	}
+	return common[id]
 }
 
 func missing(requirements []requirement) []requirement {
@@ -221,18 +247,28 @@ func packageNames(goos, id string) []string {
 	linux := map[string][]string{
 		"curl": {"curl", "ca-certificates"}, "git": {"git"}, "rg": {"ripgrep"}, "fd": {"fd-find"}, "unzip": {"unzip"}, "nvim": {"neovim"},
 		"node": {"nodejs", "npm"}, "npm": {"nodejs", "npm"},
-		"go": {"golang-go"}, "python": {"python3", "python3-venv"},
+		"go": {"golang-go"}, "python": {"python3", "python3-venv"}, "pip": {"python3-pip"},
+		"rust": {"cargo", "rustc"}, "java": {"default-jdk-headless"}, "clang": {"clang"}, "ruby": {"ruby-full"}, "php": {"php-cli"}, "lua": {"lua5.4"},
+		"jq": {"jq"}, "wget": {"wget"}, "zip": {"zip"}, "fzf": {"fzf"}, "bat": {"bat"}, "tree": {"tree"}, "shellcheck": {"shellcheck"},
+		"ip": {"iproute2"}, "ping": {"iputils-ping"}, "dns": {"dnsutils"}, "net-tools": {"net-tools"}, "traceroute": {"traceroute"}, "netcat": {"netcat-openbsd"},
+		"nmap": {"nmap"}, "mtr": {"mtr-tiny"}, "tcpdump": {"tcpdump"}, "whois": {"whois"},
 		"docker": {"docker.io", "docker-compose-v2"}, "docker-compose": {"docker-compose-v2"},
 	}
 	darwin := map[string][]string{
 		"curl": {"curl"}, "git": {"git"}, "rg": {"ripgrep"}, "fd": {"fd"}, "unzip": {"unzip"}, "nvim": {"neovim"},
-		"node": {"node"}, "npm": {"node"}, "go": {"go"}, "python": {"python"},
+		"node": {"node"}, "npm": {"node"}, "go": {"go"}, "python": {"python"}, "pip": {"python"},
+		"rust": {"rust"}, "java": {"cask:temurin"}, "clang": {"llvm"}, "ruby": {"ruby"}, "php": {"php"}, "lua": {"lua"},
+		"jq": {"jq"}, "wget": {"wget"}, "zip": {"zip"}, "fzf": {"fzf"}, "bat": {"bat"}, "tree": {"tree"}, "shellcheck": {"shellcheck"},
+		"ip": {"iproute2mac"}, "nmap": {"nmap"}, "mtr": {"mtr"},
 		"docker": {"cask:docker"}, "docker-compose": {"cask:docker"},
 	}
 	windows := map[string][]string{
-		"git": {"Git.Git"}, "rg": {"BurntSushi.ripgrep.MSVC"},
+		"curl": {"cURL.cURL"}, "git": {"Git.Git"}, "rg": {"BurntSushi.ripgrep.MSVC"},
 		"fd": {"sharkdp.fd"}, "nvim": {"Neovim.Neovim"}, "node": {"OpenJS.NodeJS.LTS"}, "npm": {"OpenJS.NodeJS.LTS"},
-		"go": {"GoLang.Go"}, "python": {"Python.Python.3.13"},
+		"go": {"GoLang.Go"}, "python": {"Python.Python.3.13"}, "pip": {"Python.Python.3.13"},
+		"rust": {"Rustlang.Rustup"}, "java": {"EclipseAdoptium.Temurin.21.JDK"}, "clang": {"LLVM.LLVM"}, "ruby": {"RubyInstallerTeam.RubyWithDevKit.3.3"}, "php": {"PHP.PHP.8.4"}, "lua": {"DEVCOM.Lua"},
+		"jq": {"jqlang.jq"}, "wget": {"JernejSimoncic.Wget"}, "zip": {"GnuWin32.Zip"}, "fzf": {"junegunn.fzf"}, "bat": {"sharkdp.bat"}, "shellcheck": {"koalaman.shellcheck"},
+		"netcat": {"Insecure.Nmap"}, "nmap": {"Insecure.Nmap"}, "whois": {"Microsoft.Sysinternals"},
 		"docker":         {"Docker.DockerDesktop"},
 		"docker-compose": {"Docker.DockerDesktop"},
 	}

@@ -32,6 +32,28 @@ func TestDockerBuildPlanResolvesOnlySelectedAndRequiredTools(t *testing.T) {
 	if !plan.Codex || plan.Node || plan.OpenCode || plan.Git {
 		t.Fatalf("Codex dependencies leaked unrelated tools: %#v", plan)
 	}
+
+	minimal.Set(appconfig.Tools, "rust", true)
+	minimal.Set(appconfig.Tools, "jq", true)
+	plan = resolveDockerBuildPlan(minimal)
+	if packages := strings.Join(plan.ExtraPackages, " "); packages != "cargo jq rustc" {
+		t.Fatalf("selected extra packages = %q, want %q", packages, "cargo jq rustc")
+	}
+}
+
+func TestEveryAdditionalToolHasASelectiveDockerPackageMapping(t *testing.T) {
+	special := map[string]bool{
+		"git": true, "rg": true, "nvim": true, "nvchad": true,
+		"node": true, "go": true, "python": true,
+	}
+	for _, option := range appconfig.Options {
+		if option.Category != appconfig.Tools || special[option.ID] {
+			continue
+		}
+		if len(dockerExtraPackages[option.ID]) == 0 {
+			t.Fatalf("tool %q has no Docker package mapping", option.ID)
+		}
+	}
 }
 
 func TestDockerBuildLeavesProgressModeToTheComposeWrapper(t *testing.T) {
@@ -97,6 +119,28 @@ func TestDockerNvChadSelectionSurvivesAnExistingHomeVolume(t *testing.T) {
 	for _, expected := range []string{`keys = "fr"`, "browse_filesystem", "lisan-file-browser.lua"} {
 		if !strings.Contains(string(entrypoint), expected) {
 			t.Fatalf("persistent NvChad migration omits %q", expected)
+		}
+	}
+}
+
+func TestDockerFishPromptIsManagedAcrossExistingHomeVolumes(t *testing.T) {
+	root := filepath.Join("..", "..")
+	entrypoint, err := os.ReadFile(filepath.Join(root, "docker", "lisan-entrypoint"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt, err := os.ReadFile(filepath.Join(root, "docker", "home", ".config", "fish", "conf.d", "lisan-prompt.fish"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"conf.d/lisan-prompt.fish", "cp \"$template/.config/fish/conf.d/lisan-prompt.fish\""} {
+		if !strings.Contains(string(entrypoint), expected) {
+			t.Fatalf("persistent Fish prompt migration omits %q", expected)
+		}
+	}
+	for _, expected := range []string{"$prompt_user", "prompt_hostname", "prompt_pwd", "$last_status"} {
+		if !strings.Contains(string(prompt), expected) {
+			t.Fatalf("Fish prompt omits %q", expected)
 		}
 	}
 }
@@ -217,7 +261,7 @@ func TestDockerfilePinsEveryAgentPayloadWithoutManifestTooling(t *testing.T) {
 }
 
 func TestConnectorDockerfileCopiesOnlyItsDependencyPackages(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "docker", "connectors", "host-check", "Dockerfile"))
+	data, err := os.ReadFile(filepath.Join("..", "..", "docker", "connectors", "ixian-proving-ground", "Dockerfile"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,14 +274,18 @@ func TestConnectorDockerfileCopiesOnlyItsDependencyPackages(t *testing.T) {
 			t.Fatalf("connector build omits dependency package %s", dependency)
 		}
 	}
+	if !strings.Contains(dockerfile, "COPY --chmod=0555 docker/connectors/ixian-proving-ground/ixian-showcase /usr/local/bin/ixian-showcase") {
+		t.Fatal("reference extension does not install its allowlisted dispatcher as read-only executable content")
+	}
 }
 
 func TestDockerBuildArgumentsContainResolvedPlan(t *testing.T) {
 	profile := appconfig.ProfileFromPreset(appconfig.Presets[3], time.Now())
 	profile.Terminal.DockerShell = "zsh"
 	profile.Set(appconfig.Tools, "go", true)
+	profile.Set(appconfig.Tools, "jq", true)
 	joined := strings.Join(resolveDockerBuildPlan(profile).buildArguments("digest"), " ")
-	for _, expected := range []string{"LISAN_BUILD_SIGNATURE=digest", "LISAN_DOCKER_SHELL=zsh", "LISAN_SHELL_PATH=/usr/bin/zsh", "LISAN_INSTALL_GO=1", "LISAN_INSTALL_NODE=0"} {
+	for _, expected := range []string{"LISAN_BUILD_SIGNATURE=digest", "LISAN_DOCKER_SHELL=zsh", "LISAN_SHELL_PATH=/usr/bin/zsh", "LISAN_INSTALL_GO=1", "LISAN_INSTALL_NODE=0", "LISAN_INSTALL_EXTRA_PACKAGES=jq"} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("Docker build arguments omit %q: %s", expected, joined)
 		}

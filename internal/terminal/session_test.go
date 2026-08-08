@@ -127,6 +127,44 @@ func TestSessionRecoversFromOutOfBoundsScrollRegion(t *testing.T) {
 	}
 }
 
+func TestSessionViewportUsesPrimaryScreenScrollback(t *testing.T) {
+	emulator := vt.NewSafeEmulator(12, 3)
+	session := &Session{emulator: emulator, width: 12, height: 3}
+	session.applyOutput([]byte("one\r\ntwo\r\nthree\r\nfour"))
+
+	if limit := session.ScrollbackLen(); limit == 0 {
+		t.Fatal("terminal did not retain primary-screen history")
+	}
+	live, offset, limit := session.RenderViewport(0)
+	if offset != 0 || !strings.Contains(live, "four") {
+		t.Fatalf("live viewport = offset %d/%d, screen %q", offset, limit, live)
+	}
+	history, offset, limit := session.RenderViewport(10_000)
+	if offset != limit || !strings.Contains(history, "one") || strings.Contains(history, "four") {
+		t.Fatalf("history viewport = offset %d/%d, screen %q", offset, limit, history)
+	}
+
+	session.applyOutput([]byte("\x1b[?1049hALT"))
+	alternate, offset, limit := session.RenderViewport(10_000)
+	if offset != 0 || limit != 0 || !strings.Contains(alternate, "ALT") {
+		t.Fatalf("alternate screen exposed wrapper history: offset %d/%d, screen %q", offset, limit, alternate)
+	}
+}
+
+func TestSessionUsesItsWidthForNaturalWrapping(t *testing.T) {
+	emulator := vt.NewSafeEmulator(4, 4)
+	session := &Session{emulator: emulator, width: 4, height: 4}
+	session.applyOutput([]byte("0123456789"))
+
+	lines := strings.Split(session.Render(), "\n")
+	for len(lines) < 3 {
+		lines = append(lines, "")
+	}
+	if lines[0] != "0123" || lines[1] != "4567" || lines[2] != "89" {
+		t.Fatalf("terminal did not wrap at its real width: %#v", lines)
+	}
+}
+
 func TestSessionPausePreservesStateWithoutBackgroundWork(t *testing.T) {
 	counter := filepath.Join(t.TempDir(), "counter")
 	session, err := Start(Spec{

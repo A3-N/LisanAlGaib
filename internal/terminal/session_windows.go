@@ -26,6 +26,7 @@ type Session struct {
 	command     *exec.Cmd
 	emulator    *vt.SafeEmulator
 	background  color.Color
+	screenMu    sync.Mutex
 	stdin       io.WriteCloser
 	frames      chan struct{}
 	exit        chan error
@@ -109,6 +110,8 @@ func (s *Session) Cursor() Cursor {
 	return Cursor{X: p.X, Y: p.Y, Visible: true, Style: vt.CursorBlock, Blink: true}
 }
 func (s *Session) Resize(width, height int) error {
+	s.screenMu.Lock()
+	defer s.screenMu.Unlock()
 	s.emulator.Resize(max(width, 2), max(height, 2))
 	s.signalFrame()
 	return nil
@@ -172,7 +175,9 @@ func (s *Session) readOutput(output io.Reader) {
 	for {
 		count, err := output.Read(buffer)
 		if count > 0 {
+			s.screenMu.Lock()
 			_, _ = s.emulator.Write(buffer[:count])
+			s.screenMu.Unlock()
 			s.signalFrame()
 		}
 		if err != nil {

@@ -889,7 +889,7 @@ func dockerVertexCategory(label, name string) string {
 		}
 		return "Compiling Lisan"
 	}
-	if strings.Contains(lower, "guild_navigator") {
+	if strings.Contains(lower, "mentat_payloads") {
 		return "Fetching selected agents"
 	}
 	if strings.Contains(lower, "apt-get install -y --no-install-recommends $packages") || strings.Contains(lower, "installing selected packages") {

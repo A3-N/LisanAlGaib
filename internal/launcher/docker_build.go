@@ -15,19 +15,49 @@ import (
 )
 
 type dockerBuildPlan struct {
-	Shell     string
-	ShellPath string
-	Git       bool
-	Ripgrep   bool
-	Neovim    bool
-	NvChad    bool
-	Node      bool
-	Go        bool
-	Python    bool
-	Codex     bool
-	OpenCode  bool
-	Claude    bool
-	Kimi      bool
+	Shell         string
+	ShellPath     string
+	Git           bool
+	Ripgrep       bool
+	Neovim        bool
+	NvChad        bool
+	Node          bool
+	Go            bool
+	Python        bool
+	ExtraPackages []string
+	Codex         bool
+	OpenCode      bool
+	Claude        bool
+	Kimi          bool
+}
+
+var dockerExtraPackages = map[string][]string{
+	"pip":        {"python3-pip"},
+	"rust":       {"cargo", "rustc"},
+	"java":       {"default-jdk-headless"},
+	"clang":      {"clang"},
+	"ruby":       {"ruby-full"},
+	"php":        {"php-cli"},
+	"lua":        {"lua5.4"},
+	"curl":       {"curl"},
+	"jq":         {"jq"},
+	"wget":       {"wget"},
+	"zip":        {"zip"},
+	"fd":         {"fd-find"},
+	"fzf":        {"fzf"},
+	"bat":        {"bat"},
+	"tree":       {"tree"},
+	"shellcheck": {"shellcheck"},
+	"ip":         {"iproute2"},
+	"ping":       {"iputils-ping"},
+	"dns":        {"dnsutils"},
+	"net-tools":  {"net-tools"},
+	"traceroute": {"traceroute"},
+	"netcat":     {"netcat-openbsd"},
+	"nmap":       {"nmap"},
+	"mtr":        {"mtr-tiny"},
+	"tcpdump":    {"tcpdump"},
+	"whois":      {"whois"},
 }
 
 func resolveDockerBuildPlan(profile appconfig.Profile) dockerBuildPlan {
@@ -46,6 +76,19 @@ func resolveDockerBuildPlan(profile appconfig.Profile) dockerBuildPlan {
 	plan.Node = profile.Tool("node")
 	plan.Go = profile.Tool("go")
 	plan.Python = profile.Tool("python")
+	extraPackages := map[string]bool{}
+	for id, packages := range dockerExtraPackages {
+		if !profile.Tool(id) {
+			continue
+		}
+		for _, name := range packages {
+			extraPackages[name] = true
+		}
+	}
+	for name := range extraPackages {
+		plan.ExtraPackages = append(plan.ExtraPackages, name)
+	}
+	sort.Strings(plan.ExtraPackages)
 
 	if profile.Feature("agents") {
 		plan.Codex = profile.Agent("codex")
@@ -71,6 +114,7 @@ func (plan dockerBuildPlan) buildArguments(signature string) []string {
 		{"LISAN_INSTALL_NODE", buildBool(plan.Node)},
 		{"LISAN_INSTALL_GO", buildBool(plan.Go)},
 		{"LISAN_INSTALL_PYTHON", buildBool(plan.Python)},
+		{"LISAN_INSTALL_EXTRA_PACKAGES", strings.Join(plan.ExtraPackages, " ")},
 		{"LISAN_INSTALL_CODEX", buildBool(plan.Codex)},
 		{"LISAN_INSTALL_OPENCODE", buildBool(plan.OpenCode)},
 		{"LISAN_INSTALL_CLAUDE", buildBool(plan.Claude)},

@@ -18,23 +18,22 @@ RUN CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' 
 FROM ubuntu:26.04@sha256:678c6550cc43645e08669028bc177f50be4e7c5b8cca677067b1914d4afc7a03
 
 ENV DEBIAN_FRONTEND=noninteractive \
-    HOME=/home/checker \
+    HOME=/home/ixian \
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
-      curl \
-      hostname \
-      procps && \
-    groupadd --gid 10001 checker && \
-    useradd --create-home --uid 10001 --gid checker --shell /usr/sbin/nologin checker && \
+      curl && \
+    groupadd --gid 10001 ixian && \
+    useradd --create-home --uid 10001 --gid ixian --shell /usr/sbin/nologin ixian && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=heighliner /out/extension-host /usr/local/bin/extension-host
-COPY docker/connectors/host-check/extension.json /etc/lisan/extension.json
+COPY --chmod=0444 docker/connectors/ixian-proving-ground/extension.json /etc/lisan/extension.json
+COPY --chmod=0555 docker/connectors/ixian-proving-ground/ixian-showcase /usr/local/bin/ixian-showcase
 
-USER checker
-WORKDIR /home/checker
+USER ixian
+WORKDIR /home/ixian
 EXPOSE 7777
 HEALTHCHECK --interval=20s --timeout=3s --start-period=5s --retries=3 \
   CMD curl -fsS http://127.0.0.1:7777/v1/health || exit 1

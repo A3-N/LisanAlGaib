@@ -24,8 +24,11 @@ seed_file agents/opencode/AGENTS.md
 seed_file agents/kimi/AGENTS.md
 seed_file agents/claude/CLAUDE.md
 if command -v fish >/dev/null 2>&1; then
-  mkdir -p /home/fremen/.config/fish
+  mkdir -p /home/fremen/.config/fish/conf.d
   seed_file .config/fish/config.fish
+  # This is a Lisan-owned fragment, so image updates can improve the prompt
+  # without replacing the user's main Fish configuration.
+  cp "$template/.config/fish/conf.d/lisan-prompt.fish" /home/fremen/.config/fish/conf.d/lisan-prompt.fish
 fi
 
 # A named home volume masks files added by a later profile image. Seed NvChad

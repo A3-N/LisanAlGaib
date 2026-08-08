@@ -35,8 +35,9 @@ type ToolSpec struct {
 
 type ActionSpec struct {
 	connectors.Action
-	Command string   `json:"command"`
+	Command string   `json:"command,omitempty"`
 	Args    []string `json:"args,omitempty"`
+	Output  string   `json:"output,omitempty"`
 }
 
 type Host struct {
@@ -73,8 +74,15 @@ func LoadConfig(path string) (Configuration, error) {
 	}
 	seenActions := map[string]bool{}
 	for _, action := range config.Actions {
-		if action.ID == "" || action.Name == "" || action.Command == "" || seenActions[action.ID] {
-			return Configuration{}, errors.New("each extension action requires a unique id, name, and command")
+		implementationCount := 0
+		if action.Command != "" {
+			implementationCount++
+		}
+		if action.Output != "" {
+			implementationCount++
+		}
+		if action.ID == "" || action.Name == "" || implementationCount != 1 || seenActions[action.ID] {
+			return Configuration{}, errors.New("each extension action requires a unique id and name, plus exactly one command or static output")
 		}
 		seenActions[action.ID] = true
 		config.Manifest.Actions = append(config.Manifest.Actions, action.Action)
@@ -235,6 +243,13 @@ func runHandler(config Configuration, writer http.ResponseWriter, request *http.
 
 func runAction(parent context.Context, action ActionSpec) connectors.RunResponse {
 	started := time.Now()
+	if action.Output != "" {
+		return connectors.RunResponse{
+			ActionID:   action.ID,
+			Output:     action.Output,
+			DurationMS: time.Since(started).Milliseconds(),
+		}
+	}
 	ctx, cancel := context.WithTimeout(parent, 12*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, action.Command, action.Args...)

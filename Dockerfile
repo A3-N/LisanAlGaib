@@ -12,7 +12,7 @@ RUN CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' 
 
 # Agent download tooling never enters the final image. Each payload is fetched
 # only when its profile selection is enabled.
-FROM ubuntu:26.04@sha256:678c6550cc43645e08669028bc177f50be4e7c5b8cca677067b1914d4afc7a03 AS guild_navigator
+FROM ubuntu:26.04@sha256:678c6550cc43645e08669028bc177f50be4e7c5b8cca677067b1914d4afc7a03 AS mentat_payloads
 
 ARG TARGETARCH
 ARG LISAN_INSTALL_CODEX=0
@@ -129,6 +129,7 @@ ARG LISAN_INSTALL_NVCHAD=0
 ARG LISAN_INSTALL_NODE=0
 ARG LISAN_INSTALL_GO=0
 ARG LISAN_INSTALL_PYTHON=0
+ARG LISAN_INSTALL_EXTRA_PACKAGES=
 
 RUN set -eu; \
     case "$LISAN_DOCKER_SHELL:$LISAN_SHELL_PATH" in \
@@ -144,11 +145,14 @@ RUN set -eu; \
     if [ "$LISAN_INSTALL_NODE" = 1 ]; then packages="$packages nodejs npm"; fi; \
     if [ "$LISAN_INSTALL_GO" = 1 ]; then packages="$packages golang-go"; fi; \
     if [ "$LISAN_INSTALL_PYTHON" = 1 ]; then packages="$packages python3 python3-venv"; fi; \
+    packages="$packages $LISAN_INSTALL_EXTRA_PACKAGES"; \
     if [ -n "$packages" ]; then \
       apt-get update; \
       apt-get install -y --no-install-recommends $packages; \
     fi; \
     if command -v fdfind >/dev/null 2>&1; then ln -s /usr/bin/fdfind /usr/local/bin/fd; fi; \
+    if command -v batcat >/dev/null 2>&1; then ln -s /usr/bin/batcat /usr/local/bin/bat; fi; \
+    if command -v lua5.4 >/dev/null 2>&1 && ! command -v lua >/dev/null 2>&1; then ln -s /usr/bin/lua5.4 /usr/local/bin/lua; fi; \
     rm -rf /var/lib/apt/lists/*; \
     usermod --shell "$LISAN_SHELL_PATH" fremen
 
@@ -156,7 +160,7 @@ ENV SHELL=${LISAN_SHELL_PATH} \
     LISAN_NVCHAD=${LISAN_INSTALL_NVCHAD}
 
 COPY --from=heighliner /out/lisan /usr/local/bin/lisan
-COPY --from=guild_navigator /opt/lisan-agents /opt/lisan-agents
+COPY --from=mentat_payloads /opt/lisan-agents /opt/lisan-agents
 COPY docker/lisan-entrypoint /usr/local/bin/lisan-entrypoint
 COPY docker/nvim /usr/local/share/lisan/nvim
 COPY docker/home /usr/local/share/lisan/home

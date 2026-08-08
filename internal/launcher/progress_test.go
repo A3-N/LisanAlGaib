@@ -66,7 +66,7 @@ func TestStructuredCategoriesReplaceOneAnotherWithoutFlicker(t *testing.T) {
 	display := newDockerProgressDisplay(&output, "Building Sietch Tabr", true, 180)
 	display.start()
 	display.consumeLine(`{"vertexes":[{"digest":"sha256:compile","name":"[heighliner 2/4] RUN go build ./cmd/lisan","started":"2026-08-08T00:00:00Z"}]}`)
-	display.consumeLine(`{"vertexes":[{"digest":"sha256:agents","name":"[guild_navigator 2/2] RUN set -eu","started":"2026-08-08T00:00:01Z"}]}`)
+	display.consumeLine(`{"vertexes":[{"digest":"sha256:agents","name":"[mentat_payloads 2/2] RUN set -eu","started":"2026-08-08T00:00:01Z"}]}`)
 	if !strings.Contains(display.lastLine, "Compiling Lisan") || !strings.Contains(display.lastLine, "+1 parallel") {
 		t.Fatalf("active category was not pinned while parallel work appeared: %q", display.lastLine)
 	}
@@ -91,7 +91,7 @@ func TestStructuredTransferUsesExactDockerByteProgress(t *testing.T) {
 		}
 	}
 	if !strings.Contains(display.lastLine, "╾━━━━━━━━━━▶─────────╼") {
-		t.Fatalf("transfer did not render an Ornithopter rail: %q", display.lastLine)
+		t.Fatalf("transfer did not render its moving rail: %q", display.lastLine)
 	}
 }
 

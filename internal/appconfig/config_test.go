@@ -28,6 +28,40 @@ func TestDefaultAndSavedSelectionHistory(t *testing.T) {
 	}
 }
 
+func TestGoldenPathDefaultsToPythonAndCoreNetworkTools(t *testing.T) {
+	active, ok := DefaultDocument(time.Now()).Active()
+	if !ok {
+		t.Fatal("default document has no active profile")
+	}
+	for _, id := range []string{"node", "go", "rust", "java", "clang", "ruby", "php", "lua"} {
+		if active.Tool(id) {
+			t.Fatalf("language %q unexpectedly starts selected", id)
+		}
+	}
+	for _, id := range []string{"python", "pip", "curl", "zip", "ip", "ping", "dns", "net-tools", "traceroute", "netcat"} {
+		if !active.Tool(id) {
+			t.Fatalf("default tool %q did not start selected", id)
+		}
+	}
+	for _, id := range []string{"jq", "wget", "fd", "fzf", "bat", "tree", "shellcheck", "nmap", "mtr", "tcpdump", "whois"} {
+		if active.Tool(id) {
+			t.Fatalf("optional tool %q unexpectedly starts selected", id)
+		}
+	}
+}
+
+func TestNamedPresetRefreshesWhenToolCatalogChanges(t *testing.T) {
+	profile := ProfileFromPreset(Presets[0], time.Now())
+	profile.Tools["node"] = true
+	profile.Tools["go"] = true
+	delete(profile.Tools, "pip")
+	delete(profile.Tools, "curl")
+	normalizeProfile(&profile)
+	if profile.Tool("node") || profile.Tool("go") || !profile.Tool("pip") || !profile.Tool("curl") {
+		t.Fatalf("named preset retained stale tool defaults: %#v", profile.Tools)
+	}
+}
+
 func TestRoundTripAndEnvironmentProfile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "config.json")
 	document := DefaultDocument(time.Now())
@@ -74,6 +108,19 @@ func TestEveryPresetExcludesRemovedHostOptions(t *testing.T) {
 				t.Fatalf("preset %q includes removed host option %q: %#v", preset.ID, removed, profile)
 			}
 		}
+	}
+}
+
+func TestLegacySkillsFeatureIsRemovedDuringNormalization(t *testing.T) {
+	profile := ProfileFromPreset(Presets[0], time.Now())
+	profile.ID = "legacy-skills"
+	profile.Features["skills"] = true
+	normalized, err := NormalizeProfile(profile)
+	if err != nil {
+		t.Fatalf("legacy skills feature prevented profile loading: %v", err)
+	}
+	if _, exists := normalized.Features["skills"]; exists {
+		t.Fatalf("removed skills feature survived normalization: %#v", normalized.Features)
 	}
 }
 
@@ -147,22 +194,26 @@ func TestWorkspaceContainerUserIsKnown(t *testing.T) {
 	}
 }
 
-func TestDefaultExtensionIsOptInAndExplicitFullPresetEnablesIt(t *testing.T) {
+func TestBundledExtensionIsOptInForEveryPreset(t *testing.T) {
 	now := time.Now()
 	document := DefaultDocument(now)
 	active, _ := document.Active()
-	if len(active.Connectors) != 1 || active.Connectors[0].ID != "host-check" || active.Connectors[0].Enabled || active.Connectors[0].Network != "arrakis-shield-wall" {
-		t.Fatalf("new config did not expose disabled Ornithopter: %#v", active.Connectors)
+	if len(active.Connectors) != 1 || active.Connectors[0].ID != "ixian-proving-ground" || active.Connectors[0].Enabled || active.Connectors[0].Network != "arrakis-shield-wall" {
+		t.Fatalf("new config did not expose disabled Ixian Proving Ground: %#v", active.Connectors)
 	}
 	for _, connector := range active.Connectors {
 		if connector.Managed && connector.NativeConfig == "" {
 			t.Fatalf("managed extension has no Wormsign native config: %#v", connector)
 		}
 	}
-	changed := ProfileFromPreset(Presets[0], now.Add(time.Second))
-	if !changed.Connectors[0].Enabled {
-		t.Fatalf("explicit Golden Path did not enable Ornithopter: %#v", changed.Connectors)
+	for _, preset := range Presets {
+		profile := ProfileFromPreset(preset, now.Add(time.Second))
+		if len(profile.Connectors) != 1 || profile.Connectors[0].Enabled {
+			t.Fatalf("preset %q implicitly enabled an extension: %#v", preset.ID, profile.Connectors)
+		}
 	}
+	changed := ProfileFromPreset(Presets[0], now.Add(time.Second))
+	changed.Connectors[0].Enabled = true
 	saved := document.SaveSelection(changed, now.Add(time.Second))
 	if saved.ID == active.ID || len(document.Profiles) != 2 {
 		t.Fatalf("connector toggle was not versioned: %#v", document)
@@ -174,6 +225,8 @@ func TestBundledExtensionMigrationReplacesLegacyExamples(t *testing.T) {
 	profile.Connectors = []ConnectorConfig{
 		{ID: "mobile-lab", Enabled: true},
 		{ID: "runtime-scout", Enabled: true},
+		{ID: "host-check", Enabled: true},
+		{ID: "guild-navigator", Enabled: true},
 		{ID: "third-party", Name: "Third Party", Enabled: true},
 	}
 	normalizeProfile(&profile)
@@ -183,8 +236,8 @@ func TestBundledExtensionMigrationReplacesLegacyExamples(t *testing.T) {
 	if profile.Connectors[0].ID != "third-party" {
 		t.Fatalf("third-party extension was not preserved: %#v", profile.Connectors)
 	}
-	if profile.Connectors[1].ID != "host-check" || !profile.Connectors[1].Enabled {
-		t.Fatalf("Ornithopter example was not added: %#v", profile.Connectors)
+	if profile.Connectors[1].ID != "ixian-proving-ground" || profile.Connectors[1].Enabled {
+		t.Fatalf("disabled Ixian Proving Ground was not added: %#v", profile.Connectors)
 	}
 }
 
@@ -193,14 +246,13 @@ func TestLegacyRuntimeNamesMigrateToArrakis(t *testing.T) {
 	profile.Name = "Dune Full"
 	profile.Terminal.DockerUser = "dune"
 	profile.Terminal.DockerWorkdir = "/home/dune/projects/example"
-	profile.Connectors[0].Name = "Host Check"
 	profile.Connectors[0].Network = "lisan-al-gaib"
 	normalizeProfile(&profile)
 
 	if profile.Name != "Golden Path" || profile.Terminal.DockerUser != "fremen" || profile.Terminal.DockerWorkdir != "/home/fremen/projects/example" {
 		t.Fatalf("legacy runtime identity was not migrated: %#v", profile)
 	}
-	if profile.Connectors[0].Name != "Ornithopter" || profile.Connectors[0].Network != "arrakis-shield-wall" {
+	if profile.Connectors[0].Name != "Ixian Proving Ground" || profile.Connectors[0].Network != "arrakis-shield-wall" {
 		t.Fatalf("legacy connector vocabulary was not migrated: %#v", profile.Connectors[0])
 	}
 }
@@ -248,7 +300,7 @@ func TestConfigRejectsDuplicateExtensionsAndCredentialEndpoints(t *testing.T) {
 
 	document = DefaultDocument(time.Now())
 	document.Profiles[0].Connectors[0].Enabled = true
-	document.Profiles[0].Connectors[0].Endpoint = "http://user:placeholder@host-check:7777"
+	document.Profiles[0].Connectors[0].Endpoint = "http://user:placeholder@ixian-proving-ground:7777"
 	if err := Save(path, document); err == nil || !strings.Contains(err.Error(), "without credentials") {
 		t.Fatalf("credential-bearing extension URL was accepted: %v", err)
 	}

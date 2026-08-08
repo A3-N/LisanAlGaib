@@ -2,7 +2,7 @@ package ui
 
 import _ "embed"
 
-// overviewASCII is the shared Overview and NvChad dashboard artwork.
+// overviewBannerASCII is the single Overview artwork at every viewport size.
 //
-//go:embed ascii.txt
-var overviewASCII string
+//go:embed ascii.banner
+var overviewBannerASCII string

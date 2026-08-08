@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"image/color"
 	"os"
 	"path/filepath"
@@ -45,8 +46,10 @@ func TestMouseTopBarAndTheme(t *testing.T) {
 	}
 }
 
-func TestRepeatedTopClickTogglesSidebarExceptFilesAndExtensions(t *testing.T) {
-	model := NewModel(t.TempDir())
+func TestRepeatedTopClickTogglesSidebarExceptFullWidthPagesAndExtensions(t *testing.T) {
+	profile := appconfig.ProfileFromPreset(appconfig.Presets[0], time.Now())
+	profile.Connectors[0].Enabled = true
+	model := NewModelWithProfile(t.TempDir(), profile)
 	model.width = 120
 	model.height = 30
 
@@ -82,6 +85,13 @@ func TestRepeatedTopClickTogglesSidebarExceptFilesAndExtensions(t *testing.T) {
 		t.Fatal("repeated Files click added a wrapper sidebar over NvChad")
 	}
 
+	overviewX := topX(sectionOverview)
+	model.handleClick(tea.MouseClickMsg{X: overviewX, Y: 1, Button: tea.MouseLeft})
+	model.handleClick(tea.MouseClickMsg{X: overviewX, Y: 1, Button: tea.MouseLeft})
+	if model.sidebar || model.sidebarDrawn() {
+		t.Fatal("repeated Overview click added a redundant sidebar")
+	}
+
 	extensionsX := topX(sectionExtensions)
 	model.handleClick(tea.MouseClickMsg{X: extensionsX, Y: 1, Button: tea.MouseLeft})
 	if !model.extensionsOpen || !model.sidebar {
@@ -100,7 +110,7 @@ func TestMinimalProfileOnlyLoadsOverview(t *testing.T) {
 		t.Fatalf("disabled pages leaked into navigation: %#v", model.navigation)
 	}
 	message := model.Init()().(refreshMsg)
-	if len(message.Inventory.Tools) != 0 || len(message.Inventory.APTManual) != 0 || len(message.Skills) != 0 {
+	if len(message.Inventory.Tools) != 0 || len(message.Inventory.APTManual) != 0 {
 		t.Fatalf("minimal profile scanned disabled dependencies: %#v", message)
 	}
 }
@@ -134,22 +144,25 @@ func TestContainerTerminalUsesOnlyConfiguredDockerShell(t *testing.T) {
 	}
 }
 
-func TestOverviewUsesSharedASCIIArtwork(t *testing.T) {
+func TestOverviewUsesResponsiveASCIIArtwork(t *testing.T) {
 	model := NewModel(t.TempDir())
 	model.width = 120
 	model.height = 40
-	art := fitASCII(overviewASCII, model.mainPaneWidth()-4, model.mainContentHeight()-2)
-	if len(art) < 6 {
-		t.Fatalf("overview artwork was not fitted: %#v", art)
+	artwork, ok := overviewArtworkForViewport(model.mainPaneWidth()-4, model.mainContentHeight()-2)
+	if !ok {
+		t.Fatal("overview did not select artwork for the default viewport")
 	}
-	if content := model.View().Content; !strings.Contains(content, art[0]) {
-		t.Fatal("Overview does not render the shared ascii.txt artwork")
+	art := artwork.crop(model.mainPaneWidth()-4, model.mainContentHeight()-2)
+	if len(art) < 6 {
+		t.Fatalf("overview artwork was not cropped: %#v", art)
+	}
+	if content := model.View().Content; !strings.Contains(content, strings.TrimSpace(art[0])) {
+		t.Fatal("Overview does not render the selected responsive artwork")
+	}
+	if model.sidebarDrawn() || model.mainPaneWidth() != model.wrapSafeWidth() {
+		t.Fatalf("Overview is not full width: sidebar=%v main=%d safe=%d", model.sidebarDrawn(), model.mainPaneWidth(), model.wrapSafeWidth())
 	}
 	viewLines := strings.Split(model.View().Content, "\n")
-	sidebar := model.renderSidebar(theme.All[model.themeIndex], model.mainContentHeight())
-	if width := lipgloss.Width(sidebar); width != sidebarWidth {
-		t.Fatalf("Overview sidebar has width %d, want configured width %d", width, sidebarWidth)
-	}
 	for index, line := range viewLines[model.topHeight() : len(viewLines)-footerHeight] {
 		if width := lipgloss.Width(line); width != model.wrapSafeWidth() {
 			t.Fatalf("Overview body row %d has width %d, want wrap-safe width %d", index, width, model.wrapSafeWidth())
@@ -161,41 +174,76 @@ func TestOverviewUsesSharedASCIIArtwork(t *testing.T) {
 			t.Fatalf("Overview main pane still contains redundant metadata %q", redundant)
 		}
 	}
-	rows := model.sidebarRows()
-	joined := ""
-	for _, row := range rows {
-		joined += row.Label + "\n"
-		if row.Kind != rowInfo {
-			t.Fatalf("Overview sidebar contains an interactive page row: %#v", row)
-		}
-	}
-	if !strings.Contains(joined, "Scanning tools") || !strings.Contains(joined, "SHORTCUTS") {
-		t.Fatalf("Overview status rail is incomplete: %q", joined)
+	if rows := model.sidebarRows(); len(rows) != 0 {
+		t.Fatalf("Overview still exposes redundant pane rows: %#v", rows)
 	}
 }
 
-func TestOverviewArtworkUsesOneCanvasAtEveryWidth(t *testing.T) {
-	for _, width := range []int{72, 240} {
-		art := fitASCII(overviewASCII, width, 100)
-		if len(art) == 0 {
-			t.Fatalf("artwork was empty at width %d", width)
-		}
-		expectedWidth := lipgloss.Width(art[0])
-		if expectedWidth != min(width, 118) {
-			t.Fatalf("artwork width is %d at limit %d, want %d", expectedWidth, width, min(width, 118))
-		}
-		for index, line := range art {
-			if lineWidth := lipgloss.Width(line); lineWidth != expectedWidth {
-				t.Fatalf("artwork row %d has width %d at limit %d, want shared canvas width %d", index, lineWidth, width, expectedWidth)
-			}
-		}
+func TestOverviewArtworkSelectionAndCropping(t *testing.T) {
+	tests := []struct {
+		name          string
+		width, height int
+		wantVisible   bool
+	}{
+		{name: "full banner", width: overviewBanner.width, height: overviewBanner.height, wantVisible: true},
+		{name: "large crop", width: 150, height: 43, wantVisible: true},
+		{name: "small banner crop", width: overviewMinimumWidth, height: overviewMinimumHeight, wantVisible: true},
+		{name: "too narrow", width: overviewMinimumWidth - 1, height: overviewMinimumHeight, wantVisible: false},
+		{name: "too short", width: overviewMinimumWidth, height: overviewMinimumHeight - 1, wantVisible: false},
 	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			artwork, ok := overviewArtworkForViewport(test.width, test.height)
+			if ok != test.wantVisible {
+				t.Fatalf("artwork visibility is %v, want %v", ok, test.wantVisible)
+			}
+			if !ok {
+				return
+			}
+			if artwork.width != overviewBanner.width || artwork.height != overviewBanner.height {
+				t.Fatalf("viewport selected a non-banner canvas: %dx%d", artwork.width, artwork.height)
+			}
 
+			art := artwork.crop(test.width, test.height)
+			wantWidth := min(test.width, artwork.width)
+			wantHeight := min(test.height, artwork.height)
+			if len(art) != wantHeight {
+				t.Fatalf("cropped height is %d, want %d", len(art), wantHeight)
+			}
+			startX := (artwork.width - wantWidth) / 2
+			startY := (artwork.height - wantHeight) * 3 / 4
+			wantFirstRow := string(artwork.rows[startY][startX : startX+wantWidth])
+			if art[0] != wantFirstRow {
+				t.Fatal("crop resampled or selected the wrong source row")
+			}
+			for index, line := range art {
+				if width := lipgloss.Width(line); width != wantWidth {
+					t.Fatalf("cropped row %d has width %d, want %d", index, width, wantWidth)
+				}
+			}
+		})
+	}
+}
+
+func TestOverviewVerticalCropPreservesMoreOfTheBottom(t *testing.T) {
+	artwork := newASCIIArtwork("0\n1\n2\n3\n4\n5\n6\n7\n8\n9")
+	got := artwork.crop(1, 6)
+	want := []string{"3", "4", "5", "6", "7", "8"}
+	if strings.Join(got, "") != strings.Join(want, "") {
+		t.Fatalf("asymmetric vertical crop = %#v, want %#v", got, want)
+	}
+}
+
+func TestOverviewArtworkUsesOnePositionedCanvas(t *testing.T) {
 	const (
 		viewportWidth  = 240
-		viewportHeight = 60
+		viewportHeight = 64
 	)
-	art := fitASCII(overviewASCII, viewportWidth-4, viewportHeight-2)
+	artwork, ok := overviewArtworkForViewport(viewportWidth-4, viewportHeight-2)
+	if !ok {
+		t.Fatalf("large viewport selected %#v, visible=%v", artwork, ok)
+	}
+	art := artwork.crop(viewportWidth-4, viewportHeight-2)
 	lines := (&Model{}).overviewLines(theme.All[0], viewportWidth, viewportHeight)
 	top := (viewportHeight - len(art)) / 2
 	left := (viewportWidth - lipgloss.Width(art[0])) / 2
@@ -209,6 +257,7 @@ func TestOverviewArtworkUsesOneCanvasAtEveryWidth(t *testing.T) {
 
 func TestExtensionsUseOneStickyMenuAndManifestDrivenPanels(t *testing.T) {
 	profile := appconfig.ProfileFromPreset(appconfig.Presets[0], time.Now())
+	profile.Connectors[0].Enabled = true
 	custom := appconfig.ConnectorConfig{
 		ID: "custom-probe", Name: "Custom Probe", Icon: "󰒍", Enabled: true,
 		Container: "custom-probe", Network: "arrakis-shield-wall", Endpoint: "http://custom-probe:7777",
@@ -220,7 +269,7 @@ func TestExtensionsUseOneStickyMenuAndManifestDrivenPanels(t *testing.T) {
 		if item.Name == "Extensions" && item.Section == sectionExtensions {
 			extensionTabs++
 		}
-		if item.Name == "Ornithopter" || item.Name == "Custom Probe" {
+		if item.Name == "Ixian Proving Ground" || item.Name == "Custom Probe" {
 			t.Fatalf("extension leaked into the top bar as its own tab: %#v", model.navigation)
 		}
 	}
@@ -231,7 +280,7 @@ func TestExtensionsUseOneStickyMenuAndManifestDrivenPanels(t *testing.T) {
 		{
 			Config: profile.Connectors[0], Online: true,
 			Manifest: connectorapi.Manifest{
-				ProtocolVersion: connectorapi.ProtocolVersion, ID: "host-check", Name: "Ornithopter",
+				ProtocolVersion: connectorapi.ProtocolVersion, ID: "ixian-proving-ground", Name: "Ixian Proving Ground",
 				UI: connectorapi.UIConfig{
 					Sidebar: []connectorapi.Panel{
 						{ID: "tools", Title: "Tools", Kind: connectorapi.PanelTools, Expanded: true},
@@ -261,7 +310,7 @@ func TestExtensionsUseOneStickyMenuAndManifestDrivenPanels(t *testing.T) {
 		t.Fatalf("extension page did not select its advertised action: page=%v action=%q", model.page, model.selectedAction)
 	}
 	if firstRowOfKind(model.sidebarRows(), rowConnectorTool) < 0 || firstRowOfKind(model.sidebarRows(), rowConnectorAction) < 0 {
-		t.Fatal("Ornithopter manifest panels were not rendered")
+		t.Fatal("Ixian Proving Ground manifest panels were not rendered")
 	}
 
 	var customX int
@@ -408,13 +457,14 @@ func TestToolsCategoriesStartCollapsed(t *testing.T) {
 
 func TestExtensionCycleRetainsMenuAndSelectedAction(t *testing.T) {
 	profile := appconfig.ProfileFromPreset(appconfig.Presets[0], time.Now())
+	profile.Connectors[0].Enabled = true
 	model := NewModelWithProfile(t.TempDir(), profile)
 	model.connectors = []connectorapi.State{{
 		Config: profile.Connectors[0], Online: true,
 		Manifest: connectorapi.Manifest{
 			ProtocolVersion: connectorapi.ProtocolVersion,
-			ID:              "host-check",
-			Name:            "Ornithopter",
+			ID:              "ixian-proving-ground",
+			Name:            "Ixian Proving Ground",
 			UI: connectorapi.UIConfig{Sidebar: []connectorapi.Panel{{
 				ID: "actions", Title: "Actions", Kind: connectorapi.PanelActions, Expanded: true,
 			}}},
@@ -559,6 +609,113 @@ func TestEmbeddedTerminalScreenFillsItsViewport(t *testing.T) {
 		if line != blankRow {
 			t.Fatalf("blank terminal row %d was not painted with the editor background: %q", index+1, line)
 		}
+	}
+}
+
+func TestEmbeddedTerminalScreenUsesTheNaturalLeftEdge(t *testing.T) {
+	rendered := renderTerminalScreen(
+		"\x1b[38;2;255;0;0m0123456789\x1b[0m",
+		lipgloss.Color(nvimconfig.ChocolateBackground),
+		4,
+		1,
+	)
+	if !strings.Contains(rendered, "0123") || strings.Contains(rendered, "4567") {
+		t.Fatalf("terminal renderer did not keep the natural left edge: %q", rendered)
+	}
+	if width := lipgloss.Width(rendered); width != 4 {
+		t.Fatalf("terminal viewport width = %d, want 4", width)
+	}
+}
+
+func TestExtensionOutputWrapsToThePane(t *testing.T) {
+	profile := appconfig.ProfileFromPreset(appconfig.Presets[0], time.Now())
+	profile.Connectors[0].Enabled = true
+	model := NewModelWithProfile(t.TempDir(), profile)
+	model.width = 32
+	model.height = 24
+	model.section = sectionExtensions
+	model.page = pageConnector
+	model.sidebar = false
+	model.selectedConnector = profile.Connectors[0].ID
+	model.connectors = []connectorapi.State{{
+		Config: profile.Connectors[0],
+		Online: true,
+		Manifest: connectorapi.Manifest{
+			ProtocolVersion: connectorapi.ProtocolVersion,
+			ID:              profile.Connectors[0].ID,
+			Name:            profile.Connectors[0].Name,
+			UI: connectorapi.UIConfig{
+				Sidebar: []connectorapi.Panel{{ID: "actions", Title: "Actions", Kind: connectorapi.PanelActions}},
+				Main:    []connectorapi.Panel{{ID: "output", Title: "Output", Kind: connectorapi.PanelActionOutput}},
+			},
+			Actions: []connectorapi.Action{{ID: "wrapped", Name: "Wrapped"}},
+		},
+	}}
+	longLine := "  │ " + strings.Repeat("a", 70) + "TAIL"
+	model.connectorOutput[profile.Connectors[0].ID] = connectorapi.RunResponse{
+		ActionID: "wrapped",
+		Output:   strings.TrimPrefix(longLine, "  │ ") + "\n",
+	}
+
+	width, height := model.mainPaneWidth(), model.mainContentHeight()
+	rendered := model.renderMain(theme.All[0], width, height)
+	if !strings.Contains(rendered, "TAIL") {
+		t.Fatalf("wrapped extension tail was not visible: %q", rendered)
+	}
+	for index, line := range wrapExtensionLines([]string{longLine}, width-1) {
+		if cells := visibleWidth(line); cells > width-1 {
+			t.Fatalf("wrapped extension row %d has width %d, want at most %d", index, cells, width-1)
+		}
+	}
+}
+
+func TestExtensionOutputSupportsVerticalKeysAndWheel(t *testing.T) {
+	profile := appconfig.ProfileFromPreset(appconfig.Presets[0], time.Now())
+	profile.Connectors[0].Enabled = true
+	model := NewModelWithProfile(t.TempDir(), profile)
+	model.width = 72
+	model.height = 14
+	model.section = sectionExtensions
+	model.page = pageConnector
+	model.sidebar = false
+	model.selectedConnector = profile.Connectors[0].ID
+	model.connectors = []connectorapi.State{{
+		Config: profile.Connectors[0],
+		Online: true,
+		Manifest: connectorapi.Manifest{
+			ProtocolVersion: connectorapi.ProtocolVersion,
+			ID:              profile.Connectors[0].ID,
+			Name:            profile.Connectors[0].Name,
+			UI: connectorapi.UIConfig{
+				Main: []connectorapi.Panel{{ID: "output", Title: "Output", Kind: connectorapi.PanelActionOutput}},
+			},
+		},
+	}}
+	var output strings.Builder
+	for index := range 30 {
+		fmt.Fprintf(&output, "line-%02d\n", index)
+	}
+	model.connectorOutput[profile.Connectors[0].ID] = connectorapi.RunResponse{ActionID: "long", Output: output.String()}
+
+	width, height := model.mainPaneWidth(), model.mainContentHeight()
+	if initial := model.renderMain(theme.All[0], width, height); !strings.Contains(initial, "line-00") || strings.Contains(initial, "line-29") {
+		t.Fatalf("extension did not start at the top: %q", initial)
+	}
+	model.handleWheel(tea.MouseWheelMsg{X: width - 1, Y: 8, Button: tea.MouseWheelDown})
+	if model.extensionScrollY != verticalScrollStep {
+		t.Fatalf("vertical wheel moved extension output to %d", model.extensionScrollY)
+	}
+	model.handleKey("pgdown")
+	if model.extensionScrollY <= verticalScrollStep {
+		t.Fatalf("PageDown did not advance extension output: %d", model.extensionScrollY)
+	}
+	model.handleKey("end")
+	if rendered := model.renderMain(theme.All[0], width, height); !strings.Contains(rendered, "line-29") {
+		t.Fatalf("extension bottom was not reachable: %q", rendered)
+	}
+	model.handleKey("home")
+	if model.extensionScrollY != 0 {
+		t.Fatalf("Home left extension offset at %d", model.extensionScrollY)
 	}
 }
 

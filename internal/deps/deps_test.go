@@ -34,6 +34,40 @@ func TestFilesRequiresCompleteNvChadToolchain(t *testing.T) {
 	}
 }
 
+func TestSelectedLanguagesUtilitiesAndNetworkToolsBecomeRequirements(t *testing.T) {
+	profile := appconfig.ProfileFromPreset(appconfig.Presets[3], time.Now())
+	for _, id := range []string{"pip", "rust", "jq", "ip", "dns", "netcat"} {
+		profile.Set(appconfig.Tools, id, true)
+	}
+	seen := map[string]bool{}
+	for _, item := range required(profile) {
+		seen[item.ID] = true
+	}
+	for _, id := range []string{"pip", "rust", "jq", "ip", "dns", "netcat"} {
+		if !seen[id] {
+			t.Fatalf("selected tool %q is missing from requirements: %#v", id, seen)
+		}
+	}
+	for _, id := range []string{"python", "java", "wget", "nmap"} {
+		if seen[id] {
+			t.Fatalf("disabled tool %q leaked into requirements: %#v", id, seen)
+		}
+	}
+}
+
+func TestEverySelectableToolHasANativeCommandOnEveryPlatform(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		for _, option := range appconfig.Options {
+			if option.Category != appconfig.Tools || option.ID == "nvchad" {
+				continue
+			}
+			if command := toolCommand(goos, option.ID); command == "" {
+				t.Fatalf("tool %q has no %s command mapping", option.ID, goos)
+			}
+		}
+	}
+}
+
 func TestHostTerminalDoesNotInstallOrChooseAShell(t *testing.T) {
 	t.Setenv("LISAN_CONTAINER", "")
 	profile := appconfig.ProfileFromPreset(appconfig.Presets[3], time.Now())

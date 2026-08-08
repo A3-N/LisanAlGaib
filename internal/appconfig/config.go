@@ -49,7 +49,6 @@ var Options = []Option{
 	{Features, "files", "Files + NvChad", "Embedded editor and workspace picker"},
 	{Features, "tools", "Tool inventory", "Dynamic configured-tool and package inventory"},
 	{Features, "agents", "Mentats", "Coding-agent pages; individual mentats are selected below"},
-	{Features, "skills", "Skills index", "Discover and inspect local agent skills"},
 	{Features, "terminal", "Embedded terminal", "Interactive shell page inside Lisan"},
 	{Tools, "git", "Git", "Version control"},
 	{Tools, "rg", "ripgrep", "Fast file and text search"},
@@ -58,6 +57,32 @@ var Options = []Option{
 	{Tools, "node", "Node.js + npm", "JavaScript runtime and package manager"},
 	{Tools, "go", "Go", "Go compiler and toolchain"},
 	{Tools, "python", "Python", "Python 3 runtime and virtual environments"},
+	{Tools, "pip", "pip", "Python package manager"},
+	{Tools, "rust", "Rust + Cargo", "Rust compiler and package manager"},
+	{Tools, "java", "Java JDK", "Java compiler and runtime"},
+	{Tools, "clang", "C/C++ (Clang)", "C and C++ compiler toolchain"},
+	{Tools, "ruby", "Ruby", "Ruby runtime and development tools"},
+	{Tools, "php", "PHP", "PHP command-line runtime"},
+	{Tools, "lua", "Lua", "Lua runtime"},
+	{Tools, "curl", "curl", "HTTP and data-transfer client"},
+	{Tools, "jq", "jq", "JSON query and transformation tool"},
+	{Tools, "wget", "wget", "Non-interactive network downloader"},
+	{Tools, "zip", "zip", "ZIP archive creator"},
+	{Tools, "fd", "fd", "Fast filesystem search"},
+	{Tools, "fzf", "fzf", "Fuzzy finder"},
+	{Tools, "bat", "bat", "Syntax-highlighted file viewer"},
+	{Tools, "tree", "tree", "Directory tree viewer"},
+	{Tools, "shellcheck", "ShellCheck", "Shell script static analysis"},
+	{Tools, "ip", "IProute2", "Modern IP and socket inspection (ip and ss)"},
+	{Tools, "ping", "Ping", "ICMP reachability checks"},
+	{Tools, "dns", "DNS utilities", "DNS lookup and diagnostics"},
+	{Tools, "net-tools", "Net-tools", "Legacy interface and connection inspection"},
+	{Tools, "traceroute", "Traceroute", "Network path tracing"},
+	{Tools, "netcat", "Netcat", "TCP and UDP connection diagnostics"},
+	{Tools, "nmap", "Nmap", "Network discovery and port scanning"},
+	{Tools, "mtr", "MTR", "Continuous route and latency diagnostics"},
+	{Tools, "tcpdump", "tcpdump", "Packet capture and inspection"},
+	{Tools, "whois", "Whois", "Domain and network registration lookup"},
 	{Agents, "codex", "Codex", "OpenAI coding agent CLI"},
 	{Agents, "opencode", "OpenCode", "Provider-flexible coding agent CLI"},
 	{Agents, "claude", "Claude Code", "Anthropic coding agent CLI"},
@@ -147,9 +172,10 @@ type Preset struct {
 }
 
 var Presets = []Preset{
-	preset("full", "Golden Path", "Every page, tool, and agent",
-		"files", "tools", "agents", "skills", "terminal",
-		"git", "rg", "nvim", "nvchad", "node", "go", "python",
+	preset("full", "Golden Path", "Every page and agent with a lean Python and network toolset",
+		"files", "tools", "agents", "terminal",
+		"git", "rg", "nvim", "nvchad", "python", "pip", "curl", "zip",
+		"ip", "ping", "dns", "net-tools", "traceroute", "netcat",
 		"codex", "opencode", "claude", "kimi"),
 	preset("core", "Mentat", "Core editor with NvChad, Git, search, and inventory",
 		"files", "tools", "git", "rg", "nvim", "nvchad"),
@@ -190,8 +216,7 @@ func ConfigPath() (string, error) {
 func DefaultDocument(now time.Time) Document {
 	profile := ProfileFromPreset(Presets[0], now)
 	// New installations expose bundled extensions in config but never start
-	// them implicitly. Explicitly applying Golden Path remains an opt-in and
-	// retains the preset's enabled extension behavior.
+	// them implicitly. Extensions remain a separate opt-in from every preset.
 	for index := range profile.Connectors {
 		profile.Connectors[index].Enabled = false
 	}
@@ -215,7 +240,7 @@ func ProfileFromPreset(preset Preset, now time.Time) Profile {
 		Tools:      map[string]bool{},
 		Agents:     map[string]bool{},
 		Terminal:   defaultTerminal(),
-		Connectors: defaultConnectors(preset.ID == "full"),
+		Connectors: defaultConnectors(),
 	}
 	for _, option := range Options {
 		profile.Set(option.Category, option.ID, preset.Enabled[option.ID])
@@ -481,6 +506,9 @@ func normalizeProfile(profile *Profile) {
 	if profile.Features == nil {
 		profile.Features = map[string]bool{}
 	}
+	// Skills are discovered and managed by each agent. Drop the removed wrapper
+	// index toggle so profiles from earlier releases continue to load.
+	delete(profile.Features, "skills")
 	if profile.Tools == nil {
 		profile.Tools = map[string]bool{}
 	}
@@ -494,14 +522,31 @@ func normalizeProfile(profile *Profile) {
 	if profile.Agents == nil {
 		profile.Agents = map[string]bool{}
 	}
+	// Fill options introduced after a named preset was saved. The presence of
+	// pip marks the first catalog that separated Python's package manager; older
+	// Golden Path profiles also carried Go and Node as defaults, so migrate those
+	// two choices once without rewriting later user selections during Save.
+	if preset, ok := presetByID(profile.Preset); ok {
+		_, currentToolCatalog := profile.Tools["pip"]
+		for _, option := range Options {
+			if !profile.optionConfigured(option.Category, option.ID) {
+				profile.Set(option.Category, option.ID, preset.Enabled[option.ID])
+			}
+		}
+		if preset.ID == "full" && !currentToolCatalog {
+			profile.Set(Tools, "node", false)
+			profile.Set(Tools, "go", false)
+		}
+	}
 	if profile.Connectors == nil {
-		profile.Connectors = defaultConnectors(profile.Preset == "full")
+		profile.Connectors = defaultConnectors()
 	} else {
 		// Remove examples bundled by older releases while retaining third-party
-		// extensions. Ornithopter is the only example shipped by this version.
+		// extensions. Ixian Proving Ground replaces them as the sole opt-in
+		// protocol reference.
 		retained := profile.Connectors[:0]
 		for _, connector := range profile.Connectors {
-			if connector.ID != "mobile-lab" && connector.ID != "runtime-scout" {
+			if connector.ID != "mobile-lab" && connector.ID != "runtime-scout" && connector.ID != "host-check" && connector.ID != "guild-navigator" {
 				retained = append(retained, connector)
 			}
 		}
@@ -511,7 +556,7 @@ func normalizeProfile(profile *Profile) {
 		for _, connector := range profile.Connectors {
 			configured[connector.ID] = true
 		}
-		for _, connector := range defaultConnectors(profile.Preset == "full") {
+		for _, connector := range defaultConnectors() {
 			if !configured[connector.ID] {
 				profile.Connectors = append(profile.Connectors, connector)
 			}
@@ -541,6 +586,29 @@ func normalizeProfile(profile *Profile) {
 	}
 }
 
+func (p Profile) optionConfigured(category Category, id string) bool {
+	var values map[string]bool
+	switch category {
+	case Features:
+		values = p.Features
+	case Tools:
+		values = p.Tools
+	case Agents:
+		values = p.Agents
+	}
+	_, ok := values[id]
+	return ok
+}
+
+func presetByID(id string) (Preset, bool) {
+	for _, candidate := range Presets {
+		if candidate.ID == id {
+			return candidate, true
+		}
+	}
+	return Preset{}, false
+}
+
 func defaultTerminal() TerminalConfig {
 	return TerminalConfig{
 		DockerShell:   "fish",
@@ -549,23 +617,23 @@ func defaultTerminal() TerminalConfig {
 	}
 }
 
-func defaultConnectors(enabled bool) []ConnectorConfig {
+func defaultConnectors() []ConnectorConfig {
 	return []ConnectorConfig{
 		{
-			ID:           "host-check",
-			Name:         "Ornithopter",
-			Icon:         "󰒋",
-			Description:  "Read-only runtime host diagnostics example",
-			Enabled:      enabled,
+			ID:           "ixian-proving-ground",
+			Name:         "Ixian Proving Ground",
+			Icon:         "󰒓",
+			Description:  "Disabled reference sidecar exercising every extension protocol v2 TUI capability",
+			Enabled:      false,
 			Managed:      true,
-			Image:        "lisanalgaib/host-check:1",
+			Image:        "lisanalgaib/ixian-proving-ground:1",
 			BuildContext: ".",
-			Dockerfile:   "docker/connectors/host-check/Dockerfile",
-			NativeConfig: "docker/connectors/host-check/extension.json",
-			Container:    "lisan-host-check",
+			Dockerfile:   "docker/connectors/ixian-proving-ground/Dockerfile",
+			NativeConfig: "docker/connectors/ixian-proving-ground/extension.json",
+			Container:    "lisan-ixian-proving-ground",
 			User:         "10001:10001",
 			Network:      "arrakis-shield-wall",
-			Endpoint:     "http://lisan-host-check:7777",
+			Endpoint:     "http://lisan-ixian-proving-ground:7777",
 		},
 	}
 }
@@ -583,9 +651,6 @@ func normalizeConnector(connector *ConnectorConfig) {
 	connector.User = strings.TrimSpace(connector.User)
 	connector.Network = strings.TrimSpace(connector.Network)
 	connector.Endpoint = strings.TrimSpace(connector.Endpoint)
-	if connector.ID == "host-check" && (connector.Name == "Host Check" || connector.Name == "Ornithopter Scout") {
-		connector.Name = "Ornithopter"
-	}
 	if connector.Network == "lisan-al-gaib" || connector.Network == "lisan-sietch-net" {
 		connector.Network = "arrakis-shield-wall"
 	}
@@ -605,8 +670,8 @@ func normalizeConnector(connector *ConnectorConfig) {
 		connector.Network = "arrakis-shield-wall"
 	}
 	if connector.NativeConfig == "" {
-		if connector.ID == "host-check" {
-			connector.NativeConfig = "docker/connectors/host-check/extension.json"
+		if connector.ID == "ixian-proving-ground" {
+			connector.NativeConfig = "docker/connectors/ixian-proving-ground/extension.json"
 		}
 	}
 }

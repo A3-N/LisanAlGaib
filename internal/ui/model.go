@@ -16,7 +16,6 @@ import (
 	connectorapi "lisanalgaib/internal/connectors"
 	"lisanalgaib/internal/inventory"
 	"lisanalgaib/internal/settings"
-	"lisanalgaib/internal/skills"
 	terminalhost "lisanalgaib/internal/terminal"
 	"lisanalgaib/internal/theme"
 )
@@ -27,6 +26,7 @@ const (
 	footerHeight         = 1
 	panelHeader          = 2
 	embeddedHeaderHeight = 1
+	verticalScrollStep   = 3
 )
 
 type section int
@@ -36,7 +36,6 @@ const (
 	sectionExplorer
 	sectionTools
 	sectionAgents
-	sectionSkills
 	sectionTerminal
 	sectionExtensions
 )
@@ -48,7 +47,6 @@ const (
 	pageFile
 	pageTool
 	pageAgent
-	pageSkill
 	pageTerminal
 	pageConnector
 	pageHelp
@@ -57,12 +55,10 @@ const (
 type rowKind int
 
 const (
-	rowInfo rowKind = iota
-	rowCategory
+	rowCategory rowKind = iota
 	rowTool
 	rowPackage
 	rowAgent
-	rowSkill
 	rowConnectorTool
 	rowConnectorAction
 )
@@ -87,6 +83,7 @@ type extensionViewState struct {
 	SelectedAction string
 	Cursor         int
 	Scroll         int
+	Vertical       int
 }
 
 type navItem struct {
@@ -100,7 +97,6 @@ var navigation = []navItem{
 	{sectionExplorer, "", "Files"},
 	{sectionTools, "󰒓", "Tools"},
 	{sectionAgents, "󰚩", "Mentats"},
-	{sectionSkills, "", "Skills"},
 	{sectionTerminal, "", "Terminal"},
 }
 
@@ -196,7 +192,6 @@ func (m *Model) topHeight() int {
 
 type refreshMsg struct {
 	Inventory  inventory.Snapshot
-	Skills     []skills.Skill
 	Connectors []connectorapi.State
 }
 
@@ -208,41 +203,42 @@ type connectorActionMsg struct {
 }
 
 type Model struct {
-	ctx               context.Context
-	cancel            context.CancelFunc
-	root              string
-	profile           appconfig.Profile
-	navigation        []navItem
-	width             int
-	height            int
-	section           section
-	page              page
-	previousPage      page
-	sidebar           bool
-	focusSidebar      bool
-	sidebarCursor     int
-	sidebarScroll     int
-	themeIndex        int
-	inventory         inventory.Snapshot
-	skills            []skills.Skill
-	connectors        []connectorapi.State
-	extensionsOpen    bool
-	selectedConnector string
-	selectedAction    string
-	connectorOutput   map[string]connectorapi.RunResponse
-	connectorRunning  map[string]bool
-	selectedTool      string
-	selectedAgent     string
-	selectedSkill     string
-	editorPath        string
-	expanded          map[string]bool
-	sectionViews      map[section]sectionViewState
-	extensionViews    map[string]extensionViewState
-	loading           bool
-	status            string
-	sessions          map[string]*terminalhost.Session
-	starting          map[string]bool
-	capture           bool
+	ctx                context.Context
+	cancel             context.CancelFunc
+	root               string
+	profile            appconfig.Profile
+	navigation         []navItem
+	width              int
+	height             int
+	section            section
+	page               page
+	previousPage       page
+	sidebar            bool
+	focusSidebar       bool
+	sidebarCursor      int
+	sidebarScroll      int
+	themeIndex         int
+	inventory          inventory.Snapshot
+	connectors         []connectorapi.State
+	extensionsOpen     bool
+	selectedConnector  string
+	selectedAction     string
+	connectorOutput    map[string]connectorapi.RunResponse
+	connectorRunning   map[string]bool
+	selectedTool       string
+	selectedAgent      string
+	editorPath         string
+	expanded           map[string]bool
+	sectionViews       map[section]sectionViewState
+	extensionViews     map[string]extensionViewState
+	extensionScrollY   int
+	loading            bool
+	status             string
+	sessions           map[string]*terminalhost.Session
+	starting           map[string]bool
+	capture            bool
+	terminalScrollY    int
+	terminalScrollback int
 }
 
 func NewModel(root string) *Model {
@@ -267,7 +263,7 @@ func NewModelWithProfile(root string, profile appconfig.Profile) *Model {
 		section:      sectionOverview,
 		page:         pageOverview,
 		previousPage: pageOverview,
-		sidebar:      true,
+		sidebar:      false,
 		focusSidebar: false,
 		themeIndex:   themeIndex,
 		expanded: map[string]bool{
@@ -275,7 +271,7 @@ func NewModelWithProfile(root string, profile appconfig.Profile) *Model {
 			"user":      true,
 		},
 		loading:           true,
-		status:            "Scanning configured tools, agents, skills, and extensions…",
+		status:            "Scanning configured inventory and extensions…",
 		sessions:          make(map[string]*terminalhost.Session),
 		starting:          make(map[string]bool),
 		connectorOutput:   make(map[string]connectorapi.RunResponse),
@@ -287,16 +283,15 @@ func NewModelWithProfile(root string, profile appconfig.Profile) *Model {
 }
 
 func (m *Model) Init() tea.Cmd {
-	return refreshCmd(m.ctx, m.root, m.profile)
+	return refreshCmd(m.ctx, m.profile)
 }
 
-func refreshCmd(parent context.Context, root string, profile appconfig.Profile) tea.Cmd {
+func refreshCmd(parent context.Context, profile appconfig.Profile) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(parent, 12*time.Second)
 		defer cancel()
 		return refreshMsg{
 			Inventory:  inventory.ScanSelected(ctx, inventorySelection(profile)),
-			Skills:     scanSkills(root, profile),
 			Connectors: connectorapi.Scan(ctx, profile.Connectors),
 		}
 	}
@@ -313,8 +308,6 @@ func navigationFor(profile appconfig.Profile) []navItem {
 			enabled = profile.Feature("tools")
 		case sectionAgents:
 			enabled = profile.Feature("agents") && anyAgentEnabled(profile)
-		case sectionSkills:
-			enabled = profile.Feature("skills")
 		case sectionTerminal:
 			enabled = profile.Feature("terminal")
 		}
@@ -352,8 +345,10 @@ func anyAgentEnabled(profile appconfig.Profile) bool {
 func inventorySelection(profile appconfig.Profile) inventory.Selection {
 	ids := map[string]bool{}
 	if profile.Feature("tools") {
-		for _, id := range []string{"git", "rg", "nvim", "nvchad", "node", "go", "python"} {
-			ids[id] = profile.Tool(id)
+		for _, option := range appconfig.Options {
+			if option.Category == appconfig.Tools {
+				ids[option.ID] = profile.Tool(option.ID)
+			}
 		}
 		ids["npm"] = profile.Tool("node")
 	}
@@ -375,13 +370,6 @@ func inventorySelection(profile appconfig.Profile) inventory.Selection {
 	return inventory.Selection{IDs: ids, APTManual: profile.Feature("tools")}
 }
 
-func scanSkills(root string, profile appconfig.Profile) []skills.Skill {
-	if !profile.Feature("skills") {
-		return nil
-	}
-	return skills.Scan(root)
-}
-
 func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := message.(type) {
 	case tea.WindowSizeMsg:
@@ -389,10 +377,10 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = max(msg.Height, 1)
 		m.clampCursor()
 		m.resizeVisibleSession()
+		m.clampExtensionScroll()
 		return m, nil
 	case refreshMsg:
 		m.inventory = msg.Inventory
-		m.skills = msg.Skills
 		m.connectors = msg.Connectors
 		for _, extension := range m.connectors {
 			for _, panel := range extension.Manifest.UI.Sidebar {
@@ -410,9 +398,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if runtime.GOOS == "linux" {
-			m.status = fmt.Sprintf("Detected %d tools, %d manual apt packages, %d skills, %d/%d extensions online", len(m.inventory.Tools), len(m.inventory.APTManual), len(m.skills), online, len(m.connectors))
+			m.status = fmt.Sprintf("Detected %d tools, %d manual apt packages, %d/%d extensions online", len(m.inventory.Tools), len(m.inventory.APTManual), online, len(m.connectors))
 		} else {
-			m.status = fmt.Sprintf("Detected %d tools, %d skills, %d/%d extensions online", len(m.inventory.Tools), len(m.skills), online, len(m.connectors))
+			m.status = fmt.Sprintf("Detected %d tools, %d/%d extensions online", len(m.inventory.Tools), online, len(m.connectors))
 		}
 		m.clampCursor()
 		if m.section == sectionAgents {
@@ -423,6 +411,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.section == sectionExtensions {
 			m.ensureSelectedExtensionAction()
+			m.clampExtensionScroll()
 		}
 		return m, nil
 	case connectorActionMsg:
@@ -432,6 +421,8 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			msg.Result.Error = msg.Err.Error()
 		}
 		m.connectorOutput[msg.ConnectorID] = msg.Result
+		m.extensionScrollY = 0
+		m.clampExtensionScroll()
 		if msg.Err != nil {
 			m.status = "Extension action failed: " + msg.Err.Error()
 		} else {
@@ -454,13 +445,16 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMotionMsg:
 		return m, m.forwardMouse(msg)
 	case tea.KeyPressMsg:
-		if session, _ := m.visibleSession(); session != nil && m.capture {
+		if session, id := m.visibleSession(); session != nil && m.capture {
 			if msg.String() == "ctrl+g" {
 				m.capture = false
 				m.focusSidebar = m.sidebar
 				session.Blur()
 				m.status = "Wrapper controls active; Ctrl-G or click the pane to return"
 				return m, nil
+			}
+			if id == shellSessionID && m.terminalScrollY > 0 {
+				m.moveTerminalVertically(true)
 			}
 			key := uv.Key(msg.Key())
 			session.SendKey(uv.KeyPressEvent(key))
@@ -523,7 +517,7 @@ func (m *Model) handleKey(key string) tea.Cmd {
 		}
 		m.loading = true
 		m.status = "Refreshing dynamic inventory…"
-		return refreshCmd(m.ctx, m.root, m.profile)
+		return refreshCmd(m.ctx, m.profile)
 	case "h", "left":
 		if m.sidebarDrawn() {
 			m.focusSidebar = true
@@ -567,14 +561,36 @@ func (m *Model) handleSidebarKey(key string) tea.Cmd {
 }
 
 func (m *Model) handleMainKey(key string) tea.Cmd {
+	switch key {
+	case "j", "down":
+		if m.scrollMainVertically(1) {
+			return nil
+		}
+	case "k", "up":
+		if m.scrollMainVertically(-1) {
+			return nil
+		}
+	case "pgdown":
+		if m.scrollMainVertically(max(m.mainContentHeight()-1, 1)) {
+			return nil
+		}
+	case "pgup":
+		if m.scrollMainVertically(-max(m.mainContentHeight()-1, 1)) {
+			return nil
+		}
+	case "g", "home":
+		if m.moveMainVertically(false) {
+			return nil
+		}
+	case "G", "shift+g", "end":
+		if m.moveMainVertically(true) {
+			return nil
+		}
+	}
 	switch m.page {
 	case pageFile:
 		if key == "enter" || key == "i" {
 			return m.ensureEditor(m.editorPath)
-		}
-	case pageSkill:
-		if key == "enter" || key == "e" {
-			return m.launchSelectedSkill()
 		}
 	case pageAgent:
 		if key == "enter" || key == "i" {
@@ -651,7 +667,10 @@ func (m *Model) handleClick(msg tea.MouseClickMsg) tea.Cmd {
 	}
 
 	m.focusSidebar = false
-	if session, _ := m.visibleSession(); session != nil {
+	if session, id := m.visibleSession(); session != nil {
+		if id == shellSessionID && m.terminalScrollY > 0 {
+			m.moveTerminalVertically(true)
+		}
 		m.capture = true
 		session.Focus()
 		m.status = session.Name() + " input active; Ctrl-G returns to the wrapper"
@@ -662,9 +681,9 @@ func (m *Model) handleClick(msg tea.MouseClickMsg) tea.Cmd {
 
 func (m *Model) handleWheel(msg tea.MouseWheelMsg) tea.Cmd {
 	mouse := msg.Mouse()
-	delta := 3
+	delta := verticalScrollStep
 	if mouse.Button == tea.MouseWheelUp {
-		delta = -3
+		delta = -verticalScrollStep
 	}
 	if m.sidebarDrawn() && mouse.X < sidebarWidth {
 		m.sidebarScroll = max(m.sidebarScroll+delta, 0)
@@ -672,10 +691,58 @@ func (m *Model) handleWheel(msg tea.MouseWheelMsg) tea.Cmd {
 		m.sidebarScroll = min(m.sidebarScroll, maxScroll)
 		return nil
 	}
+	if (mouse.Button == tea.MouseWheelUp || mouse.Button == tea.MouseWheelDown) && m.scrollMainVertically(delta) {
+		return nil
+	}
 	if session, _ := m.visibleSession(); session != nil {
 		return m.forwardMouse(msg)
 	}
 	return nil
+}
+
+func (m *Model) extensionVerticalLimit() int {
+	if m.page != pageConnector {
+		return 0
+	}
+	return max(len(m.wrappedConnectorLines(max(m.mainPaneWidth()-1, 1)))-m.mainContentHeight(), 0)
+}
+
+func (m *Model) clampExtensionScroll() {
+	m.extensionScrollY = min(max(m.extensionScrollY, 0), m.extensionVerticalLimit())
+}
+
+func (m *Model) scrollMainVertically(delta int) bool {
+	if m.scrollTerminalVertically(-delta) {
+		return true
+	}
+	if m.page != pageConnector {
+		return false
+	}
+	limit := m.extensionVerticalLimit()
+	m.extensionScrollY = min(max(m.extensionScrollY+delta, 0), limit)
+	if limit == 0 {
+		m.status = "Extension output fits the current height"
+	} else {
+		m.status = fmt.Sprintf("Extension vertical %d/%d · Home/End jumps", m.extensionScrollY, limit)
+	}
+	return true
+}
+
+func (m *Model) moveMainVertically(toBottom bool) bool {
+	if m.moveTerminalVertically(toBottom) {
+		return true
+	}
+	if m.page != pageConnector {
+		return false
+	}
+	if toBottom {
+		m.extensionScrollY = m.extensionVerticalLimit()
+		m.status = "Extension output bottom"
+	} else {
+		m.extensionScrollY = 0
+		m.status = "Extension output top"
+	}
+	return true
 }
 
 func (m *Model) selectSection(next section) tea.Cmd {
@@ -694,6 +761,8 @@ func (m *Model) selectSection(next section) tea.Cmd {
 	}
 	switch next {
 	case sectionOverview:
+		m.sidebar = false
+		m.focusSidebar = false
 		m.page = pageOverview
 		m.capture = false
 	case sectionExplorer:
@@ -719,16 +788,6 @@ func (m *Model) selectSection(next section) tea.Cmd {
 		}
 		m.resizeVisibleSession()
 		return m.ensureAgent(m.selectedAgent)
-	case sectionSkills:
-		m.page = pageSkill
-		m.capture = false
-		if m.selectedSkill == "" {
-			rows := m.sidebarRows()
-			if index := firstRowOfKind(rows, rowSkill); index >= 0 {
-				m.sidebarCursor = index
-				return m.activateRow(rows, index)
-			}
-		}
 	case sectionExtensions:
 		m.page = pageConnector
 		m.capture = false
@@ -785,10 +844,8 @@ func (m *Model) ensureSelectedExtensionAction() {
 
 func defaultSectionView(value section) sectionViewState {
 	switch value {
-	case sectionExplorer, sectionTerminal:
+	case sectionOverview, sectionExplorer, sectionTerminal:
 		return sectionViewState{}
-	case sectionOverview:
-		return sectionViewState{Sidebar: true}
 	default:
 		return sectionViewState{Sidebar: true, FocusSidebar: true}
 	}
@@ -825,6 +882,7 @@ func (m *Model) rememberExtensionView() {
 		SelectedAction: m.selectedAction,
 		Cursor:         m.sidebarCursor,
 		Scroll:         m.sidebarScroll,
+		Vertical:       m.extensionScrollY,
 	}
 }
 
@@ -833,10 +891,12 @@ func (m *Model) restoreExtensionView(id string) {
 		m.selectedAction = state.SelectedAction
 		m.sidebarCursor = state.Cursor
 		m.sidebarScroll = state.Scroll
+		m.extensionScrollY = state.Vertical
 	} else {
 		m.selectedAction = ""
 		m.sidebarCursor = 0
 		m.sidebarScroll = 0
+		m.extensionScrollY = 0
 	}
 	m.ensureSelectedExtensionAction()
 }
@@ -865,7 +925,7 @@ func (m *Model) resumeVisibleSession() {
 }
 
 func (m *Model) sectionSupportsSidebar() bool {
-	return m.section != sectionExplorer && m.section != sectionTerminal
+	return m.section != sectionOverview && m.section != sectionExplorer && m.section != sectionTerminal
 }
 
 func (m *Model) cycleSection(delta int) tea.Cmd {
@@ -912,17 +972,13 @@ func (m *Model) activateRow(rows []sidebarRow, index int) tea.Cmd {
 		m.capture = true
 		m.clampCursor()
 		return m.ensureAgent(row.ID)
-	case rowSkill:
-		m.selectedSkill = row.ID
-		m.page = pageSkill
-		m.focusSidebar = false
-		m.capture = false
 	case rowConnectorTool:
 		m.page = pageConnector
 		m.focusSidebar = false
 		m.capture = false
 	case rowConnectorAction:
 		m.selectedAction = row.ID
+		m.extensionScrollY = 0
 		m.page = pageConnector
 		m.focusSidebar = false
 		m.capture = false
@@ -937,7 +993,7 @@ func (m *Model) revealRow(rows []sidebarRow, index int) tea.Cmd {
 		return nil
 	}
 	switch rows[index].Kind {
-	case rowTool, rowPackage, rowAgent, rowSkill:
+	case rowTool, rowPackage, rowAgent:
 		// Merely moving through the contextual pane updates the main pane.
 		// Agent rows also surface their live embedded session.
 	default:

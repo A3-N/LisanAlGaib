@@ -96,7 +96,7 @@ directly as your host user. Use it only when you intentionally want host access.
 ## What you can select
 
 - Codex, OpenCode, Claude, and Kimi agent CLIs
-- NvChad, Git, ripgrep, Go, Python, Node.js, and common workspace tools
+- Common language runtimes, package managers, network diagnostics, and workspace utilities
 - Fish, Bash, Zsh, or POSIX `sh` inside Docker
 - Manifest-driven extensions, disabled by default
 - Minimal through full presets, with profile-aware Docker layer reuse
@@ -126,5 +126,6 @@ Output is written to ignored `dist/` files for Linux, macOS, and Windows on
 standard-pipe child backend; deeply interactive child TUIs are most complete in
 Docker or WSL.
 
-Extension authors can use the versioned protocol documented in
-[docs/connectors.md](docs/connectors.md).
+Extension authors can start with the modular authoring guide in
+[docs/extensions.md](docs/extensions.md); the exact versioned wire protocol is
+documented in [docs/connectors.md](docs/connectors.md).
