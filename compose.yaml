@@ -25,11 +25,18 @@ services:
       io.lisanalgaib.workspace: "1"
     volumes:
       - usul:/home/fremen
+      - type: bind
+        source: ${LISAN_SHARED_DIR:-./shared}
+        target: /home/fremen/shared
 
 volumes:
   usul:
     name: arrakis-usul
+    labels:
+      io.lisanalgaib.volume: "1"
 
 networks:
   default:
     name: arrakis-shield-wall
+    labels:
+      io.lisanalgaib.network: "1"

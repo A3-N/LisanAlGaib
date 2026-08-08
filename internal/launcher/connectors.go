@@ -1,6 +1,7 @@
 package launcher
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"strings"
 
 	"lisanalgaib/internal/appconfig"
+	"lisanalgaib/internal/cliout"
 )
 
 var dockerName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
@@ -94,7 +96,7 @@ func ensureManagedConnector(ctx context.Context, runtimeRoot string, connector a
 		if err != nil {
 			return false, fmt.Errorf("connector %s build context: %w", connector.ID, err)
 		}
-		arguments := []string{"build", "--tag", connector.Image}
+		arguments := []string{"build", "--label", "io.lisanalgaib.connector-image=" + connector.ID, "--tag", connector.Image}
 		if connector.Dockerfile != "" {
 			dockerfile, err := resolveRuntimePath(runtimeRoot, connector.Dockerfile)
 			if err != nil {
@@ -103,7 +105,9 @@ func ensureManagedConnector(ctx context.Context, runtimeRoot string, connector a
 			arguments = append(arguments, "--file", dockerfile)
 		}
 		arguments = append(arguments, contextPath)
-		if err := runDocker(ctx, stdout, stderr, arguments...); err != nil {
+		structured := append([]string{"build", "--progress=rawjson"}, arguments[1:]...)
+		if err := runDockerProgress(stderr, "Building extension "+connector.Name,
+			exec.CommandContext(ctx, "docker", structured...), exec.CommandContext(ctx, "docker", arguments...)); err != nil {
 			return false, fmt.Errorf("build connector %s: %w", connector.ID, err)
 		}
 	}
@@ -128,6 +132,7 @@ func ensureManagedConnector(ctx context.Context, runtimeRoot string, connector a
 			if err := runDocker(ctx, stdout, stderr, "start", connector.Container); err != nil {
 				return false, fmt.Errorf("start connector %s: %w", connector.ID, err)
 			}
+			cliout.Success(stdout, "Starting extension "+connector.Name)
 			return true, nil
 		} else {
 			return false, nil
@@ -137,6 +142,7 @@ func ensureManagedConnector(ctx context.Context, runtimeRoot string, connector a
 	if err := runDocker(ctx, stdout, stderr, arguments...); err != nil {
 		return false, fmt.Errorf("run connector %s: %w", connector.ID, err)
 	}
+	cliout.Success(stdout, "Starting extension "+connector.Name)
 	return true, nil
 }
 
@@ -254,6 +260,14 @@ func dockerOutput(ctx context.Context, arguments ...string) (string, error) {
 
 func runDocker(ctx context.Context, stdout, stderr io.Writer, arguments ...string) error {
 	command := exec.CommandContext(ctx, "docker", arguments...)
-	command.Stdout, command.Stderr = stdout, stderr
-	return command.Run()
+	if dockerVerbose() {
+		command.Stdout, command.Stderr = stdout, stderr
+		return command.Run()
+	}
+	var captured bytes.Buffer
+	command.Stdout, command.Stderr = &captured, &captured
+	if err := command.Run(); err != nil {
+		return dockerCommandError(err, captured.String())
+	}
+	return nil
 }

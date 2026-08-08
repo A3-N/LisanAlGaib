@@ -13,6 +13,7 @@ import (
 
 	"lisanalgaib/internal/appconfig"
 	"lisanalgaib/internal/childproc"
+	"lisanalgaib/internal/cliout"
 )
 
 type requirement struct {
@@ -190,12 +191,12 @@ func ensure(ctx context.Context, requirements []requirement, output io.Writer) e
 	if len(plan) == 0 {
 		return fmt.Errorf("configured dependencies are missing but no installer is available: %s", missingNames(missingRequirements))
 	}
-	fmt.Fprintln(output, "Installing only missing dependencies:", missingNames(missingRequirements))
+	cliout.Start(output, "Installing dependencies", missingNames(missingRequirements))
 	for _, step := range plan {
 		if step.Name == "" {
 			return errorsForUnsupported(missingRequirements)
 		}
-		fmt.Fprintln(output, "  +", step.Name, strings.Join(step.Args, " "))
+		cliout.Detail(output, "command", step.Name+" "+strings.Join(step.Args, " "))
 		if _, err := exec.LookPath(step.Name); err != nil {
 			return fmt.Errorf("%s is required to install configured dependencies: %w", step.Name, err)
 		}
@@ -212,6 +213,7 @@ func ensure(ctx context.Context, requirements []requirement, output io.Writer) e
 	if len(stillMissing) > 0 {
 		return fmt.Errorf("dependencies still missing after install: %s (open a new terminal if PATH changed)", missingNames(stillMissing))
 	}
+	cliout.Success(output, "Installing dependencies")
 	return nil
 }
 

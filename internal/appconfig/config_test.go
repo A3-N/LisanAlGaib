@@ -147,20 +147,22 @@ func TestWorkspaceContainerUserIsKnown(t *testing.T) {
 	}
 }
 
-func TestConnectorIsProfileVersionedAndFullPresetEnabled(t *testing.T) {
+func TestDefaultExtensionIsOptInAndExplicitFullPresetEnablesIt(t *testing.T) {
 	now := time.Now()
 	document := DefaultDocument(now)
 	active, _ := document.Active()
-	if len(active.Connectors) != 1 || active.Connectors[0].ID != "host-check" || !active.Connectors[0].Enabled || active.Connectors[0].Network != "arrakis-shield-wall" {
-		t.Fatalf("full preset is missing the Ornithopter example: %#v", active.Connectors)
+	if len(active.Connectors) != 1 || active.Connectors[0].ID != "host-check" || active.Connectors[0].Enabled || active.Connectors[0].Network != "arrakis-shield-wall" {
+		t.Fatalf("new config did not expose disabled Ornithopter: %#v", active.Connectors)
 	}
 	for _, connector := range active.Connectors {
 		if connector.Managed && connector.NativeConfig == "" {
 			t.Fatalf("managed extension has no Wormsign native config: %#v", connector)
 		}
 	}
-	changed := active.Clone()
-	changed.Connectors[0].Enabled = false
+	changed := ProfileFromPreset(Presets[0], now.Add(time.Second))
+	if !changed.Connectors[0].Enabled {
+		t.Fatalf("explicit Golden Path did not enable Ornithopter: %#v", changed.Connectors)
+	}
 	saved := document.SaveSelection(changed, now.Add(time.Second))
 	if saved.ID == active.ID || len(document.Profiles) != 2 {
 		t.Fatalf("connector toggle was not versioned: %#v", document)
@@ -245,6 +247,7 @@ func TestConfigRejectsDuplicateExtensionsAndCredentialEndpoints(t *testing.T) {
 	}
 
 	document = DefaultDocument(time.Now())
+	document.Profiles[0].Connectors[0].Enabled = true
 	document.Profiles[0].Connectors[0].Endpoint = "http://user:placeholder@host-check:7777"
 	if err := Save(path, document); err == nil || !strings.Contains(err.Error(), "without credentials") {
 		t.Fatalf("credential-bearing extension URL was accepted: %v", err)

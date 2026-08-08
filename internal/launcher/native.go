@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"lisanalgaib/internal/appconfig"
+	"lisanalgaib/internal/cliout"
 	"lisanalgaib/internal/extensionhost"
 )
 
@@ -57,7 +58,8 @@ func StartNativeConnectors(ctx context.Context, runtimeRoot string, profile appc
 		connector.Endpoint = host.Endpoint()
 		connector.Network = "native-loopback"
 		if output != nil {
-			fmt.Fprintf(output, "Native extension %s listening on %s\n", connector.Name, connector.Endpoint)
+			cliout.Success(output, "Starting extension "+connector.Name)
+			cliout.Detail(output, "endpoint", connector.Endpoint)
 		}
 	}
 	return active, runtime, nil

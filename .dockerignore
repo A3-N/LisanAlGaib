@@ -15,6 +15,7 @@ bin
 *.pfx
 coverage.out
 dist
+shared
 internal/runtimebundle/assets/runtime.tar.gz
 **/*_test.go
 **/*_windows.go

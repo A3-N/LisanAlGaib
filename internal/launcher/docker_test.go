@@ -49,3 +49,32 @@ func TestConfiguredRuntimeRequiresComposeAndDockerfile(t *testing.T) {
 		t.Fatalf("complete configured runtime was rejected: %q, %v", resolved, err)
 	}
 }
+
+func TestSharedDirectoryLivesAtSourceRoot(t *testing.T) {
+	root := t.TempDir()
+	shared, err := prepareSharedDirectory(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shared != filepath.Join(root, "shared") {
+		t.Fatalf("source shared directory = %q", shared)
+	}
+	if info, err := os.Stat(shared); err != nil || !info.IsDir() {
+		t.Fatalf("source shared directory was not created: %v", err)
+	}
+}
+
+func TestInstalledSharedDirectorySurvivesBesideRuntime(t *testing.T) {
+	configRoot := t.TempDir()
+	runtimeRoot := filepath.Join(configRoot, "runtime")
+	shared, err := prepareSharedDirectory(runtimeRoot, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shared != filepath.Join(configRoot, "shared") {
+		t.Fatalf("installed shared directory = %q", shared)
+	}
+	if strings.HasPrefix(shared, runtimeRoot+string(filepath.Separator)) {
+		t.Fatalf("installed shared directory would be replaced with runtime: %q", shared)
+	}
+}

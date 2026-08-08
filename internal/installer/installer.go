@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"lisanalgaib/internal/appconfig"
+	"lisanalgaib/internal/cliout"
 	"lisanalgaib/internal/nvimconfig"
 	"lisanalgaib/internal/runtimebundle"
 	"lisanalgaib/internal/safefile"
@@ -81,7 +82,10 @@ func Install(output io.Writer) (string, error) {
 	if err := appconfig.Save(paths.config, document); err != nil {
 		return "", err
 	}
-	fmt.Fprintf(output, "Installed LisanAlGaib %s/%s\n  binary: %s\n  config: %s\n", runtime.GOOS, runtime.GOARCH, paths.binary, paths.config)
+	cliout.Success(output, "Installing LisanAlGaib")
+	cliout.Detail(output, "platform", runtime.GOOS+"/"+runtime.GOARCH)
+	cliout.Detail(output, "binary", paths.binary)
+	cliout.Detail(output, "config", paths.config)
 	return paths.binary, nil
 }
 
@@ -118,7 +122,10 @@ func Uninstall(output io.Writer) error {
 	if result != nil {
 		return result
 	}
-	fmt.Fprintf(output, "Uninstalled LisanAlGaib\n  removed: %s\n  removed: %s\n  preserved: %s, user assets, and Docker state\n", paths.binary, paths.runtime, paths.config)
+	cliout.Success(output, "Uninstalling LisanAlGaib")
+	cliout.Detail(output, "removed", paths.binary)
+	cliout.Detail(output, "removed", paths.runtime)
+	cliout.Detail(output, "preserved", paths.config+", user assets, and Docker state")
 	return nil
 }
 

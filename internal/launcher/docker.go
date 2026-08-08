@@ -14,7 +14,13 @@ import (
 	"lisanalgaib/internal/appconfig"
 )
 
-const workspaceContainer = "sietch-tabr"
+const (
+	workspaceContainer         = "sietch-tabr"
+	workspaceImage             = "lisanalgaib:latest"
+	workspaceVolume            = "arrakis-usul"
+	workspaceNetwork           = "arrakis-shield-wall"
+	sharedDirectoryEnvironment = "LISAN_SHARED_DIR"
+)
 
 type DockerOptions struct {
 	RuntimeRoot string
@@ -38,10 +44,20 @@ func RunDocker(ctx context.Context, options DockerOptions) (resultErr error) {
 	if err != nil {
 		return err
 	}
+	sharedRoot, err := prepareSharedDirectory(root, options.RuntimeRoot != "")
+	if err != nil {
+		return err
+	}
 	compose := []string{"compose", "--project-directory", root, "-f", filepath.Join(root, "compose.yaml")}
-	run := func(arguments ...string) error {
+	composeCommand := func(arguments ...string) *exec.Cmd {
 		command := exec.CommandContext(ctx, "docker", append(compose, arguments...)...)
-		command.Stdin, command.Stdout, command.Stderr = options.Stdin, options.Stdout, options.Stderr
+		command.Env = append(os.Environ(), sharedDirectoryEnvironment+"="+sharedRoot)
+		command.Stdin = options.Stdin
+		return command
+	}
+	runInteractive := func(arguments ...string) error {
+		command := composeCommand(arguments...)
+		command.Stdout, command.Stderr = options.Stdout, options.Stderr
 		return command.Run()
 	}
 	info := exec.CommandContext(ctx, "docker", "info")
@@ -55,10 +71,12 @@ func RunDocker(ctx context.Context, options DockerOptions) (resultErr error) {
 		return err
 	}
 	workspaceWasRunning := containerRunning(ctx, workspaceContainer)
-	imageSignature, inspectErr := dockerOutput(ctx, "image", "inspect", "--format", `{{index .Config.Labels "io.lisanalgaib.build-signature"}}`, "lisanalgaib:latest")
+	imageSignature, inspectErr := dockerOutput(ctx, "image", "inspect", "--format", `{{index .Config.Labels "io.lisanalgaib.build-signature"}}`, workspaceImage)
 	rebuilt := inspectErr != nil || strings.TrimSpace(imageSignature) != buildSignature
 	if rebuilt {
-		if err := run(buildPlan.buildArguments(buildSignature)...); err != nil {
+		buildArguments := buildPlan.buildArguments(buildSignature)
+		structured := append([]string{"--progress=json"}, buildArguments...)
+		if err := runDockerProgress(options.Stderr, "Building Sietch Tabr", composeCommand(structured...), composeCommand(buildArguments...)); err != nil {
 			return fmt.Errorf("build configured Docker workspace: %w", err)
 		}
 	}
@@ -66,7 +84,9 @@ func RunDocker(ctx context.Context, options DockerOptions) (resultErr error) {
 	if rebuilt {
 		upArguments = append(upArguments, "--force-recreate")
 	}
-	if err := run(append(upArguments, "workspace")...); err != nil {
+	upArguments = append(upArguments, "workspace")
+	structuredUp := append([]string{"--progress=json"}, upArguments...)
+	if err := runDockerProgress(options.Stderr, "Starting Sietch Tabr", composeCommand(structuredUp...), composeCommand(upArguments...)); err != nil {
 		return fmt.Errorf("start configured Docker workspace: %w", err)
 	}
 	workspaceStarted := !workspaceWasRunning
@@ -88,10 +108,28 @@ func RunDocker(ctx context.Context, options DockerOptions) (resultErr error) {
 	}
 	arguments := dockerExecArguments(options, encoded)
 	user := nonempty(options.Profile.Terminal.DockerUser, "fremen")
-	if err := run(arguments...); err != nil {
+	if err := runInteractive(arguments...); err != nil {
 		return fmt.Errorf("run Lisan as %s in Docker: %w", user, err)
 	}
 	return nil
+}
+
+// prepareSharedDirectory keeps exchange data beside a release runtime so a
+// later install can atomically replace the runtime without touching user files.
+// Source checkouts use the requested root-level shared directory directly.
+func prepareSharedDirectory(runtimeRoot string, installedRuntime bool) (string, error) {
+	sharedRoot := filepath.Join(runtimeRoot, "shared")
+	if installedRuntime {
+		sharedRoot = filepath.Join(filepath.Dir(runtimeRoot), "shared")
+	}
+	sharedRoot, err := filepath.Abs(sharedRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve shared directory: %w", err)
+	}
+	if err := os.MkdirAll(sharedRoot, 0o755); err != nil {
+		return "", fmt.Errorf("create shared directory: %w", err)
+	}
+	return sharedRoot, nil
 }
 
 func containerRunning(ctx context.Context, name string) bool {

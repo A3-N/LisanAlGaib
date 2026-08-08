@@ -18,12 +18,14 @@ User-selected host terminal
             ├─ optional NvChad and configured shell
             ├─ selected native agent executables
             ├─ Usul persistent home volume
+            ├─ shared host exchange folder
             └─ Shield Wall private connector network
 ```
 
 The workspace does not mount the host Docker socket or a host project
-directory. Code inside it can still read and modify everything stored in the
-Usul volume, so treat that volume as trusted persistent data.
+directory. It mounts only the dedicated `shared` exchange directory at
+`/home/fremen/shared`. Code inside it can read, modify, or delete that folder
+and everything stored in the Usul volume, so treat both as trusted data.
 
 | Name | Actual component |
 |---|---|
@@ -31,6 +33,7 @@ Usul volume, so treat that volume as trusted persistent data.
 | Heighliner | disposable Go builder stage |
 | Sietch Tabr | isolated workspace container |
 | Usul | persistent `arrakis-usul` home volume |
+| shared | host/container exchange folder mounted at `/home/fremen/shared` |
 | Shield Wall | private `arrakis-shield-wall` network |
 | Golden Path | configuration screen and full preset |
 | Mentats | coding-agent pages |
@@ -74,17 +77,19 @@ lisan uninstall
 ```
 
 Uninstall removes the installed executable and runtime. It preserves profiles,
-user editor/agent files, Docker images and containers, and the Usul volume.
+the sibling `shared` exchange directory, user editor/agent files, Docker images
+and containers, and the Usul volume.
 
 ## Commands
 
-Running `lisan` without a command opens the launcher.
+Running `lisan` without a command prints command help. Interactive interfaces
+are entered explicitly through `config`, `vm`, or `docker`.
 
 ```text
 lisan docker [workspace]  isolated Sietch Tabr workspace (recommended)
 lisan vm [workspace]      Wormsign as the current host user (unsandboxed)
 lisan config              edit, save, and activate profiles
-lisan cleanup             stop owned services after an interrupted launch
+lisan cleanup             remove owned Docker state; preserve shared files
 lisan install             install this executable and embedded runtime
 lisan uninstall           remove executable/runtime and preserve user data
 lisan help | -h | --help  print command help
@@ -100,7 +105,7 @@ The configuration UI provides four starting presets:
 
 | Preset | Purpose |
 |---|---|
-| Golden Path | every page, tool, agent, and Ornithopter |
+| Golden Path | every page, tool, and agent; explicitly applying it also enables Ornithopter |
 | Mentat | NvChad, Git, search, and tool inventory |
 | Landsraad | editor, terminal, and every agent page |
 | Muad'Dib | overview only; no child process |
@@ -108,6 +113,11 @@ The configuration UI provides four starting presets:
 Features, tools, agents, the Docker shell, and extensions are independently
 selectable. Saving a new combination creates a versioned profile; selecting an
 existing combination reuses its revision.
+
+New configurations include Ornithopter as a visible but disabled extension, so
+the first launch never starts or builds an extension implicitly. Explicitly
+applying Golden Path later enables its bundled extension as an intentional
+opt-in.
 
 The Docker build plan is derived from the active profile:
 
@@ -136,16 +146,48 @@ user. The image carries a signature of the resolved profile and relevant build
 inputs. Matching launches reuse it; relevant changes rebuild and recreate the
 workspace while retaining Usul.
 
+Workspace and managed-extension builds consume structured Docker events instead
+of estimating a static build plan. One live row changes between real categories
+such as build inputs, Lisan compilation, selected agents, selected tools, image
+export, container creation, and startup. Its side information reports exact
+completed/discovered steps, cache hits, byte transfers, and parallel work
+whenever Docker supplies those facts. Long operations without a
+measurable total move only when Docker emits activity.
+
+Live categories use the Arrakis palette: sand for inputs, spice gold for
+compilation, violet for agents, desert orange for packages, teal for export,
+cyan for startup, green for success, and red for failure. Color is emitted only
+to a terminal and respects `NO_COLOR`; redirected output remains plain.
+The live indicator uses an Ornithopter rail (`╾━━━━▶────╼`): heavy track marks
+completed work, the nose marks current activity, and light track shows what
+remains.
+Completed categories remain as full green rails above the current category,
+forming a compact stage ledger. Elapsed timing is omitted so the ledger stays
+focused on task state and Docker-provided progress.
+
+Routine BuildKit output stays hidden. Warnings remain visible, and a failure
+prints the failed step, a bounded log tail, its Dockerfile context when supplied,
+and the final Docker error. Older Docker versions that reject JSON progress fall
+back to event-parsed plain output. Set `LISAN_DOCKER_VERBOSE=1` before launch to
+stream complete Docker output for deeper debugging.
+
+Non-interactive commands use the same twenty-cell output language for running,
+completed, skipped, and failed operations. Cleanup is deliberately simpler: it
+prints each removed object followed by a bar-free final result because those
+events already communicate its progress.
+
 Lisan records which services it started and stops only those services when the
-session exits. Containers and images remain reusable. If the process was killed
-before deferred cleanup ran:
+session exits. Containers and images remain reusable. The explicit cleanup
+command is instead a full reset:
 
 ```bash
 lisan cleanup
 ```
 
-Cleanup is idempotent and stops only Lisan-labelled services. It never deletes
-persistent data.
+Cleanup is idempotent and removes Lisan-owned workspace and extension
+containers, their images, the Shield Wall network, and the Usul home volume.
+It never touches the host `shared` directory. Docker's global BuildKit cache is
+not pruned because it is not safely attributable to one project.
 
 The Compose file deliberately has no hard CPU, memory, PID, or shared-memory
 limit. Idle operation remains small while compilers and agents can burst into
@@ -172,6 +214,13 @@ docker exec -u fremen sietch-tabr mkdir -p /home/fremen/projects/my-project
 docker cp /absolute/host/project/. sietch-tabr:/home/fremen/projects/my-project/
 docker exec -u root sietch-tabr chown -R fremen:fremen /home/fremen/projects/my-project
 ```
+
+For simple two-way file exchange, use `shared/` at the source repository root;
+it is mounted read/write at `/home/fremen/shared`. Installed releases use the
+`shared` directory beside their configuration runtime, so reinstalling or
+upgrading cannot erase it. Everything inside the directory is ignored by Git
+and excluded from the Docker build context; only `.gitkeep` tracks the empty
+directory.
 
 The container accounts have locked passwords. `fremen` is the default user and
 has passwordless `sudo` inside the workspace; this convenience is not a

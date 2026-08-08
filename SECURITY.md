@@ -5,9 +5,10 @@
 Docker mode is LisanAlGaib's recommended boundary for untrusted repositories,
 package installers, editor plugins, and coding agents. The supplied workspace
 does not mount the host Docker socket or a host project directory, and the
-bundled extension has no published port. The persistent `arrakis-usul` volume is
-still trusted data: code running in the workspace can read and modify anything
-stored there.
+bundled extension has no published port. The dedicated host `shared` directory
+is deliberately mounted read/write at `/home/fremen/shared`. The shared folder
+and persistent `arrakis-usul` volume are trusted data: code running in the
+workspace can read, modify, or delete anything stored there.
 
 `vm` deliberately enters **Wormsign** mode and removes that boundary.
 Every editor plugin, package,

@@ -189,6 +189,12 @@ func ConfigPath() (string, error) {
 
 func DefaultDocument(now time.Time) Document {
 	profile := ProfileFromPreset(Presets[0], now)
+	// New installations expose bundled extensions in config but never start
+	// them implicitly. Explicitly applying Golden Path remains an opt-in and
+	// retains the preset's enabled extension behavior.
+	for index := range profile.Connectors {
+		profile.Connectors[index].Enabled = false
+	}
 	profile.ID = "golden-path"
 	profile.Revision = 1
 	return Document{

@@ -12,11 +12,11 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"lisanalgaib/internal/appconfig"
+	"lisanalgaib/internal/cliout"
 	"lisanalgaib/internal/configui"
 	"lisanalgaib/internal/deps"
 	"lisanalgaib/internal/installer"
 	"lisanalgaib/internal/launcher"
-	"lisanalgaib/internal/launchui"
 	"lisanalgaib/internal/lifecycle"
 	"lisanalgaib/internal/teaprogram"
 	"lisanalgaib/internal/ui"
@@ -25,7 +25,6 @@ import (
 type command string
 
 const (
-	commandLaunch    command = ""
 	commandRun       command = "run"
 	commandDocker    command = "docker"
 	commandVM        command = "vm"
@@ -43,7 +42,7 @@ type options struct {
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "lisan:", err)
+		cliout.Failure(os.Stderr, "Lisan", err)
 		os.Exit(1)
 	}
 }
@@ -64,7 +63,7 @@ func run(arguments []string) (resultErr error) {
 			return err
 		}
 		if advice := installer.PathAdvice(binary); advice != "" {
-			fmt.Fprintln(os.Stdout, advice)
+			cliout.Detail(os.Stdout, "PATH", advice)
 		}
 		return nil
 	}
@@ -75,22 +74,6 @@ func run(arguments []string) (resultErr error) {
 	ctx, stopSignals := lifecycle.NotifyContext(context.Background())
 	defer stopSignals()
 
-	if options.command == commandLaunch && !insideContainer {
-		choice, err := launchui.Run()
-		if err != nil {
-			return err
-		}
-		switch choice {
-		case launchui.Docker:
-			options.command = commandDocker
-		case launchui.VM:
-			options.command = commandVM
-		case launchui.Config:
-			options.command = commandConfig
-		default:
-			return nil
-		}
-	}
 	if options.command == commandCleanup {
 		return launcher.Cleanup(ctx, launcher.CleanupOptions{Stdout: os.Stdout, Stderr: os.Stderr})
 	}
@@ -155,7 +138,7 @@ func run(arguments []string) (resultErr error) {
 
 func parseOptions(arguments []string, insideContainer bool) (options, error) {
 	if len(arguments) == 0 {
-		return options{command: commandLaunch}, nil
+		return options{command: commandHelp}, nil
 	}
 	if len(arguments) == 1 && (arguments[0] == "-h" || arguments[0] == "--help") {
 		return options{command: commandHelp}, nil
@@ -195,18 +178,21 @@ func parseOptions(arguments []string, insideContainer bool) (options, error) {
 }
 
 func printUsage(output io.Writer) {
-	fmt.Fprintln(output, `Usage: lisan [command] [workspace]
+	fmt.Fprintln(output, `LisanAlGaib ╾━━━━━━━━━━━━━━━━━━━━╼ help
+
+Usage: lisan [command] [workspace]
 
 Commands:
   docker [workspace]  launch the configured Docker workspace
   vm [workspace]      launch Wormsign as the current host user (unsandboxed)
   config              edit and activate profiles
-  cleanup             stop Lisan-managed services after an interrupted launch
+  cleanup             remove owned Docker state; preserve shared files
   install             install this executable and its embedded runtime
   uninstall           remove the executable/runtime; preserve config and data
   help, -h, --help    show this help
 
-Running lisan without a command opens the launcher.`)
+Running lisan without a command prints this help. Interactive interfaces are
+entered only through config, vm, or docker.`)
 }
 
 func workspaceRoot(configured string, wormsign bool) (string, error) {

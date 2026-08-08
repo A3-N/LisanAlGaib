@@ -33,6 +33,35 @@ func TestDockerBuildPlanResolvesOnlySelectedAndRequiredTools(t *testing.T) {
 	}
 }
 
+func TestDockerBuildLeavesProgressModeToTheComposeWrapper(t *testing.T) {
+	minimal := appconfig.ProfileFromPreset(appconfig.Presets[3], time.Now())
+	joined := strings.Join(resolveDockerBuildPlan(minimal).buildArguments("signature"), " ")
+	if !strings.HasPrefix(joined, "build ") || strings.Contains(joined, "--progress") {
+		t.Fatalf("build plan unexpectedly owns the Compose progress mode: %s", joined)
+	}
+}
+
+func TestComposeMountsOnlyTheDedicatedHostShare(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compose := string(data)
+	for _, expected := range []string{
+		"${LISAN_SHARED_DIR:-./shared}",
+		"target: /home/fremen/shared",
+		"io.lisanalgaib.volume",
+		"io.lisanalgaib.network",
+	} {
+		if !strings.Contains(compose, expected) {
+			t.Fatalf("Compose share/ownership metadata omits %q", expected)
+		}
+	}
+	if strings.Contains(compose, "/var/run/docker.sock") {
+		t.Fatal("Compose unexpectedly mounts the host Docker socket")
+	}
+}
+
 func TestDockerfileKeepsProfilePackagesAfterStableBase(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "Dockerfile"))
 	if err != nil {
