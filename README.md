@@ -1,6 +1,6 @@
 # LisanAlGaib
 
-**Full-permission vibe coding without handing your host to the vibes. A  place for `/permissions` to be abused.
+**Full-permission vibe coding without handing your host to the vibes. A  place for `/permissions` to be abused.**
 
 ![PowerShell overview](./img/pwsh1.png)
 
