@@ -2,7 +2,7 @@
 
 **Full-permission vibe coding without handing your host to the vibes. A  place for `/permissions` to be abused.
 
-![[pwsh1.png]]
+![PowerShell overview](./img/pwsh1.png)
 
 ---
 ## Table of Contents
@@ -23,7 +23,7 @@ they execute a command. LisanAlGaib is a Go terminal cockpit (lol cockpit) for c
 It has two main modes, `docker` or `vm`. Both modes give agents a persistent Linux workspace where they can install tools, run commands, and use `sudo` freely, without mounting your
 host project, Docker socket, or home directory. 
 
-![[mac3.png]]
+![macOS overview](./img/mac3.png)
 
 ---
 ## Platform Support
@@ -36,12 +36,12 @@ Standalone binary embeds everything Lisan needs to assemble its selected Docker 
 | Windows (docker) | `amd64` |
 | MacOS (docker)   | `arm64` |
 ### Windows (vmware):
-![[vmware1.png]]
+![Virtual machine running Ubuntu](./img/vmware1.png)
 _Virtual machine running Ubuntu._
 ### Windows (docker)
-![[pwsh2.png]]
+![Windows Docker workspace](./img/pwsh2.png)
 ### MacOS (docker)
-![[mac2.png]]
+![macOS Docker workspace](./img/mac2.png)
 _I would not recommend installing with the `vm` argument on your host, as this removes the isolation and defeats the purpose. _
 
 ---
@@ -98,9 +98,9 @@ go run cmd/lisan/main.go help
 
 `help` helps. 
 
-![[term1.png]]
+![Terminal session](./img/term1.png)
 _After running the `docker/vm_` argument, the tool will make use of your terminal session until `CTRL+C` on the overview page. 
-![[mac1.png]]
+![macOS terminal session](./img/mac1.png)
 
 ---
 ## Config
@@ -111,7 +111,7 @@ _After running the `docker/vm_` argument, the tool will make use of your termina
 - Manifest-driven extensions, disabled by default
 - Minimal through full presets, with profile-aware Docker layer reuse
 
-![[pwsh3.png]]
+![Configuration interface](./img/pwsh3.png)
 
 The TUI stays inside the terminal that launched it. Lisan does not choose your terminal or host shell. A Nerd Font is recommended for interface icons. The Tools inventory lives in a collapsed pane on Overview; click the active Overview tab again to reveal or hide it. 
 
