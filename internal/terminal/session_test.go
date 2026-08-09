@@ -3,6 +3,7 @@
 package terminal
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 )
 
@@ -117,6 +119,41 @@ func TestSessionKeyEncoding(t *testing.T) {
 			}
 			return
 		}
+	}
+}
+
+func TestSessionPastePreservesBracketedPaste(t *testing.T) {
+	emulator := vt.NewSafeEmulator(20, 4)
+	defer emulator.Close()
+	if _, err := emulator.Write([]byte("\x1b[?2004h")); err != nil {
+		t.Fatal(err)
+	}
+	session := &Session{emulator: emulator}
+	content := "water of life\nspice"
+	want := ansi.BracketedPasteStart + content + ansi.BracketedPasteEnd
+
+	type readResult struct {
+		value string
+		err   error
+	}
+	result := make(chan readResult, 1)
+	go func() {
+		buffer := make([]byte, len(want))
+		_, err := io.ReadFull(emulator, buffer)
+		result <- readResult{value: string(buffer), err: err}
+	}()
+	session.Paste(content)
+
+	select {
+	case got := <-result:
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		if got.value != want {
+			t.Fatalf("paste input = %q, want %q", got.value, want)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("paste input was not emitted")
 	}
 }
 

@@ -34,7 +34,6 @@ type section int
 const (
 	sectionOverview section = iota
 	sectionExplorer
-	sectionTools
 	sectionAgents
 	sectionTerminal
 	sectionExtensions
@@ -118,7 +117,6 @@ type navItem struct {
 var navigation = []navItem{
 	{sectionOverview, "󰋜", "Overview"},
 	{sectionExplorer, "", "Files"},
-	{sectionTools, "󰒓", "Tools"},
 	{sectionAgents, "󰚩", "Mentats"},
 	{sectionTerminal, "", "Terminal"},
 }
@@ -296,9 +294,10 @@ type Model struct {
 	status                  string
 	sessions                map[string]*terminalhost.Session
 	starting                map[string]bool
+	terminalWorkspace       terminalWorkspace
 	capture                 bool
-	terminalScrollY         int
-	terminalScrollback      int
+	sessionScrollY          map[string]int
+	sessionScrollback       map[string]int
 }
 
 func NewModel(root string) *Model {
@@ -334,6 +333,9 @@ func NewModelWithProfile(root string, profile appconfig.Profile) *Model {
 		status:                  "Scanning configured inventory and extensions…",
 		sessions:                make(map[string]*terminalhost.Session),
 		starting:                make(map[string]bool),
+		terminalWorkspace:       newTerminalWorkspace(),
+		sessionScrollY:          make(map[string]int),
+		sessionScrollback:       make(map[string]int),
 		connectorJobs:           make(map[string]connectorapi.Job),
 		connectorRunning:        make(map[string]bool),
 		connectorInputs:         make(map[string]map[string]map[string]string),
@@ -367,8 +369,6 @@ func navigationFor(profile appconfig.Profile) []navItem {
 		switch item.Section {
 		case sectionExplorer:
 			enabled = profile.Feature("files")
-		case sectionTools:
-			enabled = profile.Feature("tools")
 		case sectionAgents:
 			enabled = profile.Feature("agents") && anyAgentEnabled(profile)
 		case sectionTerminal:
@@ -558,6 +558,8 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.handleWheel(msg)
 	case tea.MouseMotionMsg:
 		return m, m.forwardMouse(msg)
+	case tea.PasteMsg:
+		return m, m.handlePaste(msg.Content)
 	case tea.KeyPressMsg:
 		if msg.String() == "ctrl+c" {
 			// Embedded terminals own Ctrl-C while they have input capture so a
@@ -581,8 +583,8 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = "Wrapper controls active; Ctrl-G or click the pane to return"
 				return m, nil
 			}
-			if id == shellSessionID && m.terminalScrollY > 0 {
-				m.moveTerminalVertically(true)
+			if m.sessionScrollY[id] > 0 {
+				m.moveSessionVertically(true)
 			}
 			key := uv.Key(msg.Key())
 			session.SendKey(uv.KeyPressEvent(key))
@@ -591,6 +593,45 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.handleKey(msg.String())
 	}
 	return m, nil
+}
+
+func (m *Model) handlePaste(content string) tea.Cmd {
+	if content == "" {
+		return nil
+	}
+	if m.extensionInputEdit != "" {
+		m.extensionInputText += singleLinePaste(content)
+		return nil
+	}
+	if m.extensionSessionCapture {
+		m.extensionSessionInput += singleLinePaste(content)
+		return nil
+	}
+	if session, id := m.visibleSession(); session != nil && m.capture {
+		if m.sessionScrollY[id] > 0 {
+			m.moveSessionVertically(true)
+		}
+		session.Paste(content)
+		return nil
+	}
+	if session, _ := m.visibleSession(); session != nil {
+		m.status = "Activate the embedded pane with Ctrl-G or a click before pasting"
+	}
+	return nil
+}
+
+func singleLinePaste(content string) string {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	return strings.Map(func(value rune) rune {
+		switch {
+		case value == '\n' || value == '\r' || value == '\t':
+			return ' '
+		case value < 0x20 || value == 0x7f:
+			return -1
+		default:
+			return value
+		}
+	}, content)
 }
 
 func (m *Model) handleKey(key string) tea.Cmd {
@@ -773,6 +814,24 @@ func (m *Model) handleClick(msg tea.MouseClickMsg) tea.Cmd {
 				m.status = "Extensions menu closed"
 				return nil
 			}
+			if next == m.section && next == sectionOverview {
+				if !m.profile.Feature("tools") {
+					m.status = "Tools are disabled in the active config profile"
+					return nil
+				}
+				m.sidebar = !m.sidebar
+				m.focusSidebar = m.sidebar
+				if !m.sidebar {
+					m.page = pageOverview
+				}
+				m.resizeVisibleSession()
+				state := "expanded"
+				if !m.sidebar {
+					state = "collapsed"
+				}
+				m.status = "Overview tools pane " + state
+				return nil
+			}
 			if next == m.section && next != sectionExplorer && m.sectionSupportsSidebar() {
 				m.sidebar = !m.sidebar
 				m.focusSidebar = m.sidebar
@@ -799,7 +858,7 @@ func (m *Model) handleClick(msg tea.MouseClickMsg) tea.Cmd {
 		return nil
 	}
 	if m.sidebarDrawn() && x < sidebarWidth {
-		if y == topHeight && x >= sidebarWidth-4 {
+		if m.section != sectionOverview && y == topHeight && x >= sidebarWidth-4 {
 			m.sidebar = false
 			m.resizeVisibleSession()
 			return nil
@@ -815,6 +874,51 @@ func (m *Model) handleClick(msg tea.MouseClickMsg) tea.Cmd {
 	}
 
 	m.focusSidebar = false
+	if m.page == pageTerminal {
+		mainX := 0
+		if m.sidebarDrawn() {
+			mainX = sidebarWidth
+		}
+		localX, localY := x-mainX, y-topHeight
+		if localY == 0 {
+			if control, ok := m.terminalWorkspace.toolbarAt(localX, m.mainPaneWidth()); ok {
+				switch control.Kind {
+				case terminalToolbarTab:
+					return m.activateTerminalTab(control.Tab)
+				case terminalToolbarNew:
+					return m.newTerminalTab()
+				case terminalToolbarSplitVertical:
+					return m.splitTerminal(terminalSplitVertical)
+				case terminalToolbarSplitHorizontal:
+					return m.splitTerminal(terminalSplitHorizontal)
+				case terminalToolbarClose:
+					return m.closeActiveTerminal()
+				}
+			}
+			return nil
+		}
+		for _, pane := range m.terminalWorkspace.paneRects(m.mainPaneWidth(), m.mainContentHeight()) {
+			if !pane.contains(localX, localY) {
+				continue
+			}
+			m.activateTerminalPane(pane.SessionID, true)
+			if m.sessionScrollY[pane.SessionID] > 0 {
+				m.moveSessionVertically(true)
+			}
+			if !m.starting[pane.SessionID] {
+				session := m.sessions[pane.SessionID]
+				exited := session == nil
+				if session != nil {
+					exited, _ = session.Exited()
+				}
+				if exited {
+					return m.ensureShellSession(pane.SessionID)
+				}
+			}
+			return m.forwardMouse(msg)
+		}
+		return nil
+	}
 	if m.page == pageConnector {
 		mainX := 0
 		if m.sidebarDrawn() {
@@ -826,8 +930,8 @@ func (m *Model) handleClick(msg tea.MouseClickMsg) tea.Cmd {
 		}
 	}
 	if session, id := m.visibleSession(); session != nil {
-		if id == shellSessionID && m.terminalScrollY > 0 {
-			m.moveTerminalVertically(true)
+		if m.sessionScrollY[id] > 0 {
+			m.moveSessionVertically(true)
 		}
 		m.capture = true
 		session.Focus()
@@ -839,6 +943,15 @@ func (m *Model) handleClick(msg tea.MouseClickMsg) tea.Cmd {
 
 func (m *Model) handleWheel(msg tea.MouseWheelMsg) tea.Cmd {
 	mouse := msg.Mouse()
+	if m.page == pageTerminal {
+		localX, localY := mouse.X, mouse.Y-m.topHeight()
+		for _, pane := range m.terminalWorkspace.paneRects(m.mainPaneWidth(), m.mainContentHeight()) {
+			if pane.contains(localX, localY) {
+				m.activateTerminalPane(pane.SessionID, m.capture)
+				break
+			}
+		}
+	}
 	delta := verticalScrollStep
 	if mouse.Button == tea.MouseWheelUp {
 		delta = -verticalScrollStep
@@ -870,7 +983,7 @@ func (m *Model) clampExtensionScroll() {
 }
 
 func (m *Model) scrollMainVertically(delta int) bool {
-	if m.scrollTerminalVertically(-delta) {
+	if m.scrollSessionVertically(-delta) {
 		return true
 	}
 	if m.page != pageConnector {
@@ -887,7 +1000,7 @@ func (m *Model) scrollMainVertically(delta int) bool {
 }
 
 func (m *Model) moveMainVertically(toBottom bool) bool {
-	if m.moveTerminalVertically(toBottom) {
+	if m.moveSessionVertically(toBottom) {
 		return true
 	}
 	if m.page != pageConnector {
@@ -935,16 +1048,6 @@ func (m *Model) selectSection(next section) tea.Cmd {
 		m.page = pageFile
 		m.resizeVisibleSession()
 		return m.ensureEditor("")
-	case sectionTools:
-		m.page = pageTool
-		m.capture = false
-		if m.selectedTool == "" {
-			rows := m.sidebarRows()
-			if index := firstRowOfKind(rows, rowTool, rowPackage); index >= 0 {
-				m.sidebarCursor = index
-				return m.activateRow(rows, index)
-			}
-		}
 	case sectionAgents:
 		m.page = pageAgent
 		if m.selectedAgent == "" {

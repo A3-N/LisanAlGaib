@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"image/color"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,6 +14,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/term"
 
 	"lisanalgaib/internal/appconfig"
 	connectorapi "lisanalgaib/internal/connectors"
@@ -29,15 +31,15 @@ func TestMouseTopBarAndTheme(t *testing.T) {
 	model.width = 100
 	model.height = 30
 
-	toolX := 0
+	overviewX := 0
 	for _, span := range navigationSpansFor(model.navigation, model.width) {
-		if model.navigation[span.Index].Section == sectionTools {
-			toolX = span.Start
+		if model.navigation[span.Index].Section == sectionOverview {
+			overviewX = span.Start
 		}
 	}
-	model.Update(tea.MouseClickMsg{X: toolX, Y: 1, Button: tea.MouseLeft})
-	if model.section != sectionTools || !model.sidebar {
-		t.Fatalf("mouse did not select tools section: %#v", model)
+	model.Update(tea.MouseClickMsg{X: overviewX, Y: 1, Button: tea.MouseLeft})
+	if model.section != sectionOverview || !model.sidebar {
+		t.Fatalf("repeat Overview click did not reveal tools: %#v", model)
 	}
 	before := model.themeIndex
 	model.Update(tea.MouseClickMsg{X: 99, Y: 0, Button: tea.MouseLeft})
@@ -61,18 +63,18 @@ func TestRepeatedTopClickTogglesSidebarExceptFullWidthPagesAndExtensions(t *test
 		return -1
 	}
 
-	toolsX := topX(sectionTools)
-	model.handleClick(tea.MouseClickMsg{X: toolsX, Y: 1, Button: tea.MouseLeft})
-	if model.section != sectionTools || !model.sidebar {
-		t.Fatal("first Tools click did not select its sidebar")
+	overviewX := topX(sectionOverview)
+	model.handleClick(tea.MouseClickMsg{X: overviewX, Y: 1, Button: tea.MouseLeft})
+	if model.section != sectionOverview || !model.sidebar {
+		t.Fatal("repeat Overview click did not reveal the Tools pane")
 	}
-	model.handleClick(tea.MouseClickMsg{X: toolsX, Y: 1, Button: tea.MouseLeft})
+	model.handleClick(tea.MouseClickMsg{X: overviewX, Y: 1, Button: tea.MouseLeft})
 	if model.sidebar {
-		t.Fatal("second Tools click did not collapse its sidebar")
+		t.Fatal("second repeat Overview click did not collapse the Tools pane")
 	}
-	model.handleClick(tea.MouseClickMsg{X: toolsX, Y: 1, Button: tea.MouseLeft})
+	model.handleClick(tea.MouseClickMsg{X: overviewX, Y: 1, Button: tea.MouseLeft})
 	if !model.sidebar {
-		t.Fatal("third Tools click did not restore its sidebar")
+		t.Fatal("third repeat Overview click did not restore the Tools pane")
 	}
 
 	filesX := topX(sectionExplorer)
@@ -84,11 +86,13 @@ func TestRepeatedTopClickTogglesSidebarExceptFullWidthPagesAndExtensions(t *test
 		t.Fatal("repeated Files click added a wrapper sidebar over NvChad")
 	}
 
-	overviewX := topX(sectionOverview)
 	model.handleClick(tea.MouseClickMsg{X: overviewX, Y: 1, Button: tea.MouseLeft})
+	if model.sidebar {
+		t.Fatal("navigating to Overview must start with its Tools pane collapsed")
+	}
 	model.handleClick(tea.MouseClickMsg{X: overviewX, Y: 1, Button: tea.MouseLeft})
-	if model.sidebar || model.sidebarDrawn() {
-		t.Fatal("repeated Overview click added a redundant sidebar")
+	if !model.sidebar || !model.sidebarDrawn() {
+		t.Fatal("repeated Overview click did not reveal its Tools pane")
 	}
 
 	extensionsX := topX(sectionExtensions)
@@ -173,8 +177,8 @@ func TestOverviewUsesResponsiveASCIIArtwork(t *testing.T) {
 			t.Fatalf("Overview main pane still contains redundant metadata %q", redundant)
 		}
 	}
-	if rows := model.sidebarRows(); len(rows) != 0 {
-		t.Fatalf("Overview still exposes redundant pane rows: %#v", rows)
+	if rows := model.sidebarRows(); len(rows) == 0 || rows[0].Kind != rowCategory {
+		t.Fatalf("Overview does not expose collapsed Tools rows: %#v", rows)
 	}
 }
 
@@ -401,7 +405,7 @@ func TestSectionCycleRetainsIndependentPaneState(t *testing.T) {
 		{ID: "codex", Name: "Codex", Category: "Agent CLIs", Agent: true},
 	}}
 
-	model.selectSection(sectionTools)
+	model.selectSection(sectionOverview)
 	model.selectedTool = "git"
 	model.sidebarCursor = 1
 	model.sidebarScroll = 1
@@ -412,12 +416,12 @@ func TestSectionCycleRetainsIndependentPaneState(t *testing.T) {
 	model.sidebarCursor = 0
 	model.sidebar = true
 
-	model.selectSection(sectionTools)
+	model.selectSection(sectionOverview)
 	if model.selectedTool != "git" || model.selectedAgent != "codex" {
 		t.Fatalf("tool and agent selections were not independent: tool=%q agent=%q", model.selectedTool, model.selectedAgent)
 	}
 	if model.sidebar {
-		t.Fatal("Tools sidebar collapse state was lost after cycling pages")
+		t.Fatal("Overview Tools pane must return collapsed after cycling pages")
 	}
 	if model.sidebarCursor != 1 || model.sidebarScroll != 1 {
 		t.Fatalf("Tools pane position was lost: cursor=%d scroll=%d", model.sidebarCursor, model.sidebarScroll)
@@ -434,7 +438,7 @@ func TestToolsCategoriesStartCollapsed(t *testing.T) {
 		},
 		APTManual: []inventory.Package{{Name: "curl", Version: "1"}},
 	}
-	model.section = sectionTools
+	model.section = sectionOverview
 
 	for _, row := range model.sidebarRows() {
 		if row.Kind != rowCategory {
@@ -478,7 +482,7 @@ func TestExtensionCycleRetainsMenuAndSelectedAction(t *testing.T) {
 	model.sidebarCursor = secondAction
 	model.extensionsOpen = false
 
-	model.selectSection(sectionTools)
+	model.selectSection(sectionOverview)
 	model.selectSection(sectionExtensions)
 	if model.extensionsOpen {
 		t.Fatal("Extensions dropdown reopened even though the user had closed it")
@@ -552,8 +556,203 @@ func TestEmbeddedEditorSessionSurvivesSectionCycle(t *testing.T) {
 	}
 }
 
+func TestPasteReachesCapturedTerminalAndMentatSessions(t *testing.T) {
+	content := "fear is the mind-killer\nspice must flow"
+	tests := []struct {
+		name    string
+		section section
+		page    page
+		session string
+		agentID string
+	}{
+		{name: "terminal", section: sectionTerminal, page: pageTerminal, session: shellSessionID},
+		{name: "mentat", section: sectionAgents, page: pageAgent, session: agentSessionID("codex"), agentID: "codex"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			model := NewModel(t.TempDir())
+			executable, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			session, err := terminalhost.Start(terminalhost.Spec{
+				ID: test.session, Name: test.name, Path: executable,
+				Args: []string{"-test.run=^TestTerminalChildProcess$"},
+				Dir:  model.root,
+				Env: terminalhost.Environment(os.Environ(),
+					"LISAN_TEST_TERMINAL_CHILD=1",
+					"LISAN_TEST_TERMINAL_PASTE="+content,
+				),
+			}, 60, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer session.Close()
+
+			model.sessions[test.session] = session
+			model.section, model.page = test.section, test.page
+			model.selectedAgent = test.agentID
+			if test.page == pageTerminal {
+				if id := model.terminalWorkspace.newTab(); id != test.session {
+					t.Fatalf("first terminal session ID = %q, want %q", id, test.session)
+				}
+			}
+			model.capture = true
+			waitForSessionText(t, session, "paste-ready")
+
+			model.Update(tea.PasteMsg{Content: content})
+			waitForSessionText(t, session, "paste-ok")
+		})
+	}
+}
+
+func TestSplitTerminalRoutesPasteToFocusedPane(t *testing.T) {
+	model := NewModel(t.TempDir())
+	model.section, model.page = sectionTerminal, pageTerminal
+	model.width, model.height = 100, 30
+	first := model.terminalWorkspace.newTab()
+	second, ok := model.terminalWorkspace.splitActive(terminalSplitVertical)
+	if !ok {
+		t.Fatal("could not construct split terminal")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := func(id, content string) *terminalhost.Session {
+		t.Helper()
+		width, height := model.sessionDimensions(id)
+		session, startErr := terminalhost.Start(terminalhost.Spec{
+			ID: id, Name: id, Path: executable,
+			Args: []string{"-test.run=^TestTerminalChildProcess$"},
+			Dir:  model.root,
+			Env: terminalhost.Environment(os.Environ(),
+				"LISAN_TEST_TERMINAL_CHILD=1",
+				"LISAN_TEST_TERMINAL_PASTE="+content,
+			),
+		}, width, height)
+		if startErr != nil {
+			t.Fatal(startErr)
+		}
+		model.sessions[id] = session
+		waitForSessionText(t, session, "paste-ready")
+		return session
+	}
+	firstContent, secondContent := "first pane", "second pane"
+	firstSession := start(first, firstContent)
+	defer firstSession.Close()
+	secondSession := start(second, secondContent)
+	defer secondSession.Close()
+
+	model.activateTerminalPane(first, true)
+	model.Update(tea.PasteMsg{Content: firstContent})
+	waitForSessionText(t, firstSession, "paste-ok")
+	if strings.Contains(secondSession.Render(), "paste-ok") {
+		t.Fatal("paste leaked into the inactive split")
+	}
+	model.activateTerminalPane(second, true)
+	model.Update(tea.PasteMsg{Content: secondContent})
+	waitForSessionText(t, secondSession, "paste-ok")
+}
+
+func TestPasteIntoLineInputsRemovesTerminalControls(t *testing.T) {
+	model := NewModel(t.TempDir())
+	model.extensionInputEdit = "survey:subject"
+	model.Update(tea.PasteMsg{Content: "deep\r\ndesert\t\x1b[31m"})
+	if model.extensionInputText != "deep desert [31m" {
+		t.Fatalf("extension input paste = %q", model.extensionInputText)
+	}
+
+	model.extensionInputEdit = ""
+	model.extensionSessionCapture = true
+	model.Update(tea.PasteMsg{Content: "one\ntwo"})
+	if model.extensionSessionInput != "one two" {
+		t.Fatalf("extension session paste = %q", model.extensionSessionInput)
+	}
+}
+
+func TestMentatSessionSupportsWrapperScrollback(t *testing.T) {
+	model := NewModel(t.TempDir())
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := agentSessionID("codex")
+	session, err := terminalhost.Start(terminalhost.Spec{
+		ID: id, Name: "Codex", Path: executable,
+		Args: []string{"-test.run=^TestTerminalChildProcess$"},
+		Dir:  model.root,
+		Env: terminalhost.Environment(os.Environ(),
+			"LISAN_TEST_TERMINAL_CHILD=1",
+			"LISAN_TEST_TERMINAL_SCROLLBACK=1",
+		),
+	}, 30, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	model.sessions[id] = session
+	model.section, model.page = sectionAgents, pageAgent
+	model.selectedAgent = "codex"
+	waitForSessionText(t, session, "scroll-line-19")
+	if limit := session.ScrollbackLen(); limit == 0 {
+		t.Fatal("Mentat session did not retain scrollback")
+	}
+	if !model.moveSessionVertically(false) || model.sessionScrollY[id] == 0 {
+		t.Fatal("Mentat session did not move to the top of its history")
+	}
+	content, ok := model.embeddedContent(theme.All[model.themeIndex], 30, 5)
+	if !ok || !strings.Contains(content, "scroll-line-00") {
+		t.Fatalf("Mentat history did not render its oldest output: %q", content)
+	}
+	if !model.moveSessionVertically(true) || model.sessionScrollY[id] != 0 {
+		t.Fatal("Mentat session did not return to live output")
+	}
+}
+
+func waitForSessionText(t *testing.T, session *terminalhost.Session, want string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(session.Render(), want) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("embedded session never rendered %q: %q", want, session.Render())
+}
+
 func TestTerminalChildProcess(t *testing.T) {
 	if os.Getenv("LISAN_TEST_TERMINAL_CHILD") != "1" {
+		return
+	}
+	if content := os.Getenv("LISAN_TEST_TERMINAL_PASTE"); content != "" {
+		state, err := term.MakeRaw(os.Stdin.Fd())
+		if err != nil {
+			_, _ = fmt.Fprintf(os.Stdout, "paste-raw-error:%v", err)
+			os.Exit(1)
+		}
+		defer term.Restore(os.Stdin.Fd(), state) //nolint:errcheck
+		_, _ = os.Stdout.WriteString("\x1b[?2004hpaste-ready")
+		want := ansi.BracketedPasteStart + content + ansi.BracketedPasteEnd
+		buffer := make([]byte, len(want))
+		if _, err := io.ReadFull(os.Stdin, buffer); err != nil {
+			_, _ = fmt.Fprintf(os.Stdout, "paste-read-error:%v", err)
+			os.Exit(1)
+		}
+		if string(buffer) != want {
+			_, _ = fmt.Fprintf(os.Stdout, "paste-mismatch:%q", string(buffer))
+			os.Exit(1)
+		}
+		_, _ = os.Stdout.WriteString("\r\npaste-ok")
+		return
+	}
+	if os.Getenv("LISAN_TEST_TERMINAL_SCROLLBACK") == "1" {
+		for index := range 20 {
+			_, _ = fmt.Fprintf(os.Stdout, "scroll-line-%02d\r\n", index)
+		}
+		time.Sleep(10 * time.Second)
 		return
 	}
 	_, _ = os.Stdout.WriteString("\x1b[41mnvchad-state\x1b[0m")

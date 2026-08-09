@@ -22,10 +22,13 @@ import (
 
 func (m *Model) sidebarRows() []sidebarRow {
 	switch m.section {
+	case sectionOverview:
+		if m.profile.Feature("tools") {
+			return m.toolRows(false)
+		}
+		return nil
 	case sectionExplorer:
 		return nil
-	case sectionTools:
-		return m.toolRows(false)
 	case sectionAgents:
 		return m.toolRows(true)
 	case sectionExtensions:

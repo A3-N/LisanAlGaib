@@ -109,6 +109,8 @@ directly as your host user. Use it only when you intentionally want host access.
 
 The TUI stays inside the terminal that launched it. Lisan does not choose your
 terminal or host shell. A Nerd Font is recommended for interface icons.
+The Tools inventory lives in a collapsed pane on Overview; click the active
+Overview tab again to reveal or hide it.
 
 ## Sessions and resources
 
@@ -118,6 +120,21 @@ hidden editor is paused to avoid idle redraw work. Closing the last Docker
 cockpit stops Lisan's containers, while their container state and named volumes
 remain ready for the next launch. Background processes do not survive that
 stop. `cleanup` is the destructive reset.
+
+Host terminal paste shortcuts work in an active Mentat, editor, or terminal
+pane. Lisan forwards each paste as a single bracketed-paste operation, so
+multiline text keeps the semantics expected by shells and full-screen apps.
+Press `Ctrl-G` or click the pane to activate input first. Because Lisan enables
+mouse interaction, use your terminal's selection override (often `Shift` while
+dragging) when selecting text to copy. Mentats and terminal panes each retain
+their own wrapper scroll position; use the wheel, `PgUp`/`PgDn`, or `Home`/`End`
+to move through their output history while wrapper controls are active.
+
+The Terminal toolbar can create multiple persistent in-app terminal tabs,
+split the active pane vertically (left/right) or horizontally (top/bottom), and
+close the active pane. Clicking a pane focuses it, so keyboard input, paste,
+mouse events, the cursor, resizing, and scrollback all target that pane. These
+are panes inside Lisan; it never opens or replaces a host OS terminal window.
 
 Lisan deliberately does not hardcode CPU or memory limits. That avoids quietly
 starving a heavy build and lets the same release fit laptops and workstations.

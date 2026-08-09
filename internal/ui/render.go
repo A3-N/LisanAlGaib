@@ -115,7 +115,11 @@ func (m *Model) renderTop(t theme.Theme) string {
 func (m *Model) renderSidebar(t theme.Theme, height int) string {
 	rows := m.sidebarRows()
 	visible := m.sidebarVisibleHeight()
-	header := lipgloss.NewStyle().Width(sidebarWidth - 1).Foreground(lipgloss.Color(t.Primary)).Background(lipgloss.Color(t.Panel)).Bold(true).Render(" " + strings.ToUpper(m.sectionName()) + "  󰅖")
+	title := strings.ToUpper(m.sectionName()) + "  󰅖"
+	if m.section == sectionOverview {
+		title = "TOOLS"
+	}
+	header := lipgloss.NewStyle().Width(sidebarWidth - 1).Foreground(lipgloss.Color(t.Primary)).Background(lipgloss.Color(t.Panel)).Bold(true).Render(" " + title)
 	separator := lipgloss.NewStyle().Width(sidebarWidth - 1).Foreground(lipgloss.Color(t.Border)).Background(lipgloss.Color(t.Panel)).Render(strings.Repeat("─", max(sidebarWidth-1, 1)))
 	lines := []string{header, separator}
 	for i := 0; i < visible; i++ {
@@ -791,8 +795,12 @@ func (m *Model) helpLines() []string {
 	return []string{
 		"", "  HELP // KEYBOARD & MOUSE", "  " + strings.Repeat("━", 40), "",
 		"  Mouse        click navigation, sidebar items, main controls, or embedded panes",
+		"  Overview     click again to reveal or hide the Tools pane",
+		"  Terminal bar New tab · Vert left/right · Hor top/bottom · Close active pane",
+		"  Paste        host terminal paste shortcut targets the active embedded pane",
+		"  Copy         use the host terminal's selection override (often Shift+drag)",
 		"  Re-click     collapse/restore the active sidebar; Extensions toggles its menu",
-		"  Wheel        vertically scroll Terminal history, extensions, or the sidebar",
+		"  Wheel        scroll embedded history, extensions, or the sidebar",
 		"  Tab/S-Tab    next/previous top-level page (wrapper mode)",
 		"  Ctrl-G       toggle input between embedded app and wrapper",
 		"  Ctrl-B       collapse/expand sidebar",

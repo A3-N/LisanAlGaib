@@ -58,6 +58,12 @@ func waitTerminalCmd(session *terminalhost.Session) tea.Cmd {
 
 func (m *Model) handleTerminalStarted(msg terminalStartedMsg) tea.Cmd {
 	delete(m.starting, msg.ID)
+	if terminalSessionID(msg.ID) && !m.terminalWorkspace.contains(msg.ID) {
+		if msg.Session != nil {
+			msg.Session.Close()
+		}
+		return nil
+	}
 	if msg.Err != nil {
 		m.capture = false
 		m.status = fmt.Sprintf("Could not embed %s: %v", msg.ID, msg.Err)
@@ -67,10 +73,8 @@ func (m *Model) handleTerminalStarted(msg terminalStartedMsg) tea.Cmd {
 		previous.Close()
 	}
 	m.sessions[msg.ID] = msg.Session
-	if msg.ID == shellSessionID {
-		m.terminalScrollY = 0
-		m.terminalScrollback = msg.Session.ScrollbackLen()
-	}
+	m.sessionScrollY[msg.ID] = 0
+	m.sessionScrollback[msg.ID] = msg.Session.ScrollbackLen()
 	if m.currentSessionID() == msg.ID {
 		m.capture = true
 		m.focusSidebar = false
@@ -89,15 +93,11 @@ func (m *Model) handleTerminalEvent(msg terminalEventMsg) tea.Cmd {
 		return nil
 	}
 	if msg.Event.Kind == terminalhost.FrameEvent {
-		if msg.ID == shellSessionID {
-			m.syncTerminalVerticalScroll(msg.Session)
-		}
+		m.syncSessionVerticalScroll(msg.Session)
 		return waitTerminalCmd(msg.Session)
 	}
-	if msg.ID == shellSessionID {
-		m.terminalScrollY = 0
-		m.terminalScrollback = 0
-	}
+	delete(m.sessionScrollY, msg.ID)
+	delete(m.sessionScrollback, msg.ID)
 	if msg.ID == editorSessionID {
 		m.editorPath = ""
 		if m.page == pageFile && msg.Event.Err == nil {
@@ -155,7 +155,7 @@ func (m *Model) beginSession(spec terminalhost.Spec) tea.Cmd {
 	}
 	m.starting[spec.ID] = true
 	m.status = "Starting embedded " + spec.Name + "…"
-	width, height := m.embeddedDimensions()
+	width, height := m.sessionDimensions(spec.ID)
 	return startTerminalCmd(spec, width, height)
 }
 
@@ -265,6 +265,14 @@ func directory(path string) bool {
 }
 
 func (m *Model) ensureShell() tea.Cmd {
+	id := m.terminalWorkspace.activeSessionID()
+	if id == "" {
+		id = m.terminalWorkspace.newTab()
+	}
+	return m.ensureShellSession(id)
+}
+
+func (m *Model) ensureShellSession(id string) tea.Cmd {
 	if !m.profile.Feature("terminal") {
 		m.capture = false
 		m.status = "Terminal is disabled in the active config profile"
@@ -281,12 +289,143 @@ func (m *Model) ensureShell() tea.Cmd {
 		return nil
 	}
 	return m.beginSession(terminalhost.Spec{
-		ID:   shellSessionID,
-		Name: name,
+		ID:   id,
+		Name: fmt.Sprintf("%s %d", name, terminalSessionNumber(id)),
 		Path: shell,
 		Dir:  m.root,
 		Env:  terminalhost.Environment(childEnvironment(), "SHELL="+shell),
 	})
+}
+
+func terminalSessionID(id string) bool {
+	return id == shellSessionID || strings.HasPrefix(id, shellSessionID+":")
+}
+
+func terminalSessionNumber(id string) int {
+	if id == shellSessionID {
+		return 1
+	}
+	var number int
+	if _, err := fmt.Sscanf(id, shellSessionID+":%d", &number); err == nil && number > 0 {
+		return number
+	}
+	return 1
+}
+
+func (m *Model) newTerminalTab() tea.Cmd {
+	if previous, _ := m.visibleSession(); previous != nil {
+		previous.Blur()
+	}
+	id := m.terminalWorkspace.newTab()
+	m.capture = true
+	m.focusSidebar = false
+	m.status = fmt.Sprintf("Starting terminal %d…", terminalSessionNumber(id))
+	return m.ensureShellSession(id)
+}
+
+func (m *Model) splitTerminal(axis terminalSplitAxis) tea.Cmd {
+	active := m.terminalWorkspace.activeSessionID()
+	if active == "" {
+		return m.newTerminalTab()
+	}
+	pane, ok := m.terminalWorkspace.paneRect(active, m.mainPaneWidth(), m.mainContentHeight())
+	if !ok {
+		return nil
+	}
+	if axis == terminalSplitVertical && pane.Width < terminalMinPaneWidth*2+terminalDividerSize {
+		m.status = fmt.Sprintf("Terminal pane needs at least %d columns for a vertical split", terminalMinPaneWidth*2+terminalDividerSize)
+		return nil
+	}
+	if axis == terminalSplitHorizontal && pane.Height < terminalMinPaneHeight*2+terminalDividerSize {
+		m.status = fmt.Sprintf("Terminal pane needs at least %d rows for a horizontal split", terminalMinPaneHeight*2+terminalDividerSize)
+		return nil
+	}
+	if previous := m.sessions[active]; previous != nil {
+		previous.Blur()
+	}
+	id, ok := m.terminalWorkspace.splitActive(axis)
+	if !ok {
+		return nil
+	}
+	m.capture = true
+	m.focusSidebar = false
+	m.resizeVisibleSession()
+	return m.ensureShellSession(id)
+}
+
+func (m *Model) closeActiveTerminal() tea.Cmd {
+	closed, next := m.terminalWorkspace.closeActive()
+	if closed == "" {
+		m.status = "No terminal pane to close"
+		return nil
+	}
+	if session := m.sessions[closed]; session != nil {
+		session.Close()
+		delete(m.sessions, closed)
+	}
+	delete(m.starting, closed)
+	delete(m.sessionScrollY, closed)
+	delete(m.sessionScrollback, closed)
+	if next == "" {
+		m.capture = false
+		m.status = "All terminal panes closed · New opens another"
+		return nil
+	}
+	m.capture = true
+	m.resizeVisibleSession()
+	if session := m.sessions[next]; session != nil {
+		_ = session.Resume()
+		session.Focus()
+		m.status = session.Name() + " input active; Ctrl-G returns to the wrapper"
+		return nil
+	}
+	return m.ensureShellSession(next)
+}
+
+func (m *Model) activateTerminalTab(index int) tea.Cmd {
+	previous := m.terminalWorkspace.activeSessionID()
+	next := m.terminalWorkspace.activateTab(index)
+	if next == "" {
+		return nil
+	}
+	if previous != next {
+		if session := m.sessions[previous]; session != nil {
+			session.Blur()
+		}
+	}
+	m.capture = true
+	m.resizeVisibleSession()
+	if session := m.sessions[next]; session != nil {
+		_ = session.Resume()
+		session.Focus()
+		m.status = session.Name() + " input active; Ctrl-G returns to the wrapper"
+		return nil
+	}
+	return m.ensureShellSession(next)
+}
+
+func (m *Model) activateTerminalPane(id string, capture bool) bool {
+	previous := m.terminalWorkspace.activeSessionID()
+	if !m.terminalWorkspace.activatePane(id) {
+		return false
+	}
+	if previous != id {
+		if session := m.sessions[previous]; session != nil {
+			session.Blur()
+		}
+	}
+	m.capture = capture
+	m.focusSidebar = false
+	if session := m.sessions[id]; session != nil {
+		_ = session.Resume()
+		if capture {
+			session.Focus()
+			m.status = session.Name() + " input active; Ctrl-G returns to the wrapper"
+		} else {
+			session.Blur()
+		}
+	}
+	return true
 }
 
 func shellForContext(profile appconfig.Profile) (string, string) {
@@ -384,7 +523,7 @@ func (m *Model) currentSessionID() string {
 			return agentSessionID(m.selectedAgent)
 		}
 	case pageTerminal:
-		return shellSessionID
+		return m.terminalWorkspace.activeSessionID()
 	}
 	return ""
 }
@@ -422,78 +561,91 @@ func (m *Model) embeddedDimensions() (int, int) {
 	return m.mainPaneWidth(), max(m.mainContentHeight()-embeddedHeaderHeight, 2)
 }
 
+func (m *Model) sessionDimensions(id string) (int, int) {
+	if terminalSessionID(id) {
+		if pane, ok := m.terminalWorkspace.paneRect(id, m.mainPaneWidth(), m.mainContentHeight()); ok {
+			return max(pane.Width, 2), max(pane.Height-embeddedHeaderHeight, 2)
+		}
+	}
+	return m.embeddedDimensions()
+}
+
 func (m *Model) resizeSession(session *terminalhost.Session) {
-	width, height := m.embeddedDimensions()
+	width, height := m.sessionDimensions(session.ID())
 	if err := session.Resize(width, height); err != nil {
 		m.status = fmt.Sprintf("Resize %s: %v", session.Name(), err)
 	}
 }
 
 func (m *Model) resizeVisibleSession() {
+	if m.page == pageTerminal {
+		for _, pane := range m.terminalWorkspace.paneRects(m.mainPaneWidth(), m.mainContentHeight()) {
+			if session := m.sessions[pane.SessionID]; session != nil {
+				m.resizeSession(session)
+				m.syncSessionVerticalScroll(session)
+			}
+		}
+		m.clampExtensionScroll()
+		return
+	}
 	if session, _ := m.visibleSession(); session != nil {
 		m.resizeSession(session)
-		if session.ID() == shellSessionID {
-			m.syncTerminalVerticalScroll(session)
-		}
+		m.syncSessionVerticalScroll(session)
 	}
 	m.clampExtensionScroll()
 }
 
-func (m *Model) syncTerminalVerticalScroll(session *terminalhost.Session) {
-	if session == nil || session.ID() != shellSessionID {
+func (m *Model) syncSessionVerticalScroll(session *terminalhost.Session) {
+	if session == nil {
 		return
 	}
+	id := session.ID()
 	limit := session.ScrollbackLen()
-	if m.terminalScrollY > 0 && limit > m.terminalScrollback {
-		m.terminalScrollY += limit - m.terminalScrollback
+	if m.sessionScrollY[id] > 0 && limit > m.sessionScrollback[id] {
+		m.sessionScrollY[id] += limit - m.sessionScrollback[id]
 	}
-	m.terminalScrollY = min(max(m.terminalScrollY, 0), limit)
-	m.terminalScrollback = limit
+	m.sessionScrollY[id] = min(max(m.sessionScrollY[id], 0), limit)
+	m.sessionScrollback[id] = limit
 }
 
-// scrollTerminalVertically uses a bottom-relative offset: positive values move
+// scrollSessionVertically uses a bottom-relative offset: positive values move
 // into history and negative values move back toward the live prompt.
-func (m *Model) scrollTerminalVertically(delta int) bool {
-	if m.page != pageTerminal {
-		return false
-	}
-	session := m.sessions[shellSessionID]
+func (m *Model) scrollSessionVertically(delta int) bool {
+	session, id := m.visibleSession()
 	if session == nil {
 		return false
 	}
 	limit := session.ScrollbackLen()
-	previous := m.terminalScrollY
-	m.terminalScrollY = min(max(m.terminalScrollY+delta, 0), limit)
-	m.terminalScrollback = limit
+	previous := m.sessionScrollY[id]
+	m.sessionScrollY[id] = min(max(m.sessionScrollY[id]+delta, 0), limit)
+	m.sessionScrollback[id] = limit
 	if limit == 0 && previous == 0 {
 		// Let an alternate-screen program receive the wheel itself.
 		return false
 	}
-	m.status = fmt.Sprintf("Terminal history %d/%d · Home/End jumps", m.terminalScrollY, limit)
+	m.status = fmt.Sprintf("%s history %d/%d · Home/End jumps", session.Name(), m.sessionScrollY[id], limit)
 	return true
 }
 
-func (m *Model) moveTerminalVertically(toBottom bool) bool {
-	if m.page != pageTerminal {
+func (m *Model) moveSessionVertically(toBottom bool) bool {
+	session, id := m.visibleSession()
+	if session == nil {
 		return false
 	}
-	limit := 0
-	if session := m.sessions[shellSessionID]; session != nil {
-		limit = session.ScrollbackLen()
-	}
+	limit := session.ScrollbackLen()
 	if toBottom {
-		m.terminalScrollY = 0
-		m.status = "Terminal returned to live output"
+		m.sessionScrollY[id] = 0
+		m.status = session.Name() + " returned to live output"
 	} else {
-		m.terminalScrollY = limit
-		m.status = "Terminal history top"
+		m.sessionScrollY[id] = limit
+		m.status = session.Name() + " history top"
 	}
-	m.terminalScrollback = limit
+	m.sessionScrollback[id] = limit
 	return true
 }
 
 func (m *Model) forwardMouse(message tea.MouseMsg) tea.Cmd {
-	session, _ := m.visibleSession()
+	session, id := m.visibleSession()
 	if session == nil {
 		return nil
 	}
@@ -502,20 +654,30 @@ func (m *Model) forwardMouse(message tea.MouseMsg) tea.Cmd {
 	if m.sidebarDrawn() {
 		mainX = sidebarWidth
 	}
+	paneX, paneY := 0, 0
+	width, height := m.embeddedDimensions()
+	if m.page == pageTerminal {
+		pane, ok := m.terminalWorkspace.paneRect(id, m.mainPaneWidth(), m.mainContentHeight())
+		if !ok {
+			return nil
+		}
+		paneX, paneY = pane.X, pane.Y
+		width, height = pane.Width, pane.Height-embeddedHeaderHeight
+		if height <= 0 {
+			return nil
+		}
+	}
 	local := uv.Mouse{
-		X:      mouse.X - mainX,
-		Y:      mouse.Y - m.topHeight() - embeddedHeaderHeight,
+		X:      mouse.X - mainX - paneX,
+		Y:      mouse.Y - m.topHeight() - paneY - embeddedHeaderHeight,
 		Button: mouse.Button,
 		Mod:    mouse.Mod,
 	}
-	width, height := m.embeddedDimensions()
 	if local.X < 0 || local.X >= width || local.Y < 0 || local.Y >= height {
 		return nil
 	}
-	if session.ID() == shellSessionID {
-		if m.terminalScrollY > 0 {
-			return nil
-		}
+	if m.sessionScrollY[session.ID()] > 0 {
+		return nil
 	}
 	switch message.(type) {
 	case tea.MouseClickMsg:
@@ -531,12 +693,24 @@ func (m *Model) forwardMouse(message tea.MouseMsg) tea.Cmd {
 }
 
 func (m *Model) embeddedContent(t theme.Theme, width, height int) (string, bool) {
-	session, _ := m.visibleSession()
+	if m.page == pageTerminal {
+		return m.terminalWorkspaceContent(t, width, height), true
+	}
+	session, id := m.visibleSession()
 	if session == nil {
 		return "", false
 	}
+	return m.embeddedSessionContent(session, id, t, width, height, true), true
+}
+
+func (m *Model) embeddedSessionContent(session *terminalhost.Session, id string, t theme.Theme, width, height int, active bool) string {
+	if width <= 0 || height <= 0 {
+		return ""
+	}
 	mode := "WRAPPER"
-	if m.capture {
+	if !active {
+		mode = "IDLE"
+	} else if m.capture {
 		mode = "INPUT"
 	}
 	if exited, _ := session.Exited(); exited {
@@ -546,28 +720,146 @@ func (m *Model) embeddedContent(t theme.Theme, width, height int) (string, bool)
 	if childTitle := session.Title(); childTitle != "" && childTitle != title {
 		title += " · " + childTitle
 	}
-	screen := session.Render()
-	if session.ID() == shellSessionID {
-		var effective, limit int
-		screen, effective, limit = session.RenderViewport(m.terminalScrollY)
-		m.terminalScrollY = effective
-		m.terminalScrollback = limit
+	screen, effective, limit := session.RenderViewport(m.sessionScrollY[id])
+	m.sessionScrollY[id] = effective
+	m.sessionScrollback[id] = limit
+	header := fmt.Sprintf(" %s  [%s]", title, mode)
+	if !terminalSessionID(id) {
+		header += "  Ctrl-G toggles wrapper control"
 	}
-	header := fmt.Sprintf(" %s  [%s]  Ctrl-G toggles wrapper control", title, mode)
-	if session.ID() == shellSessionID {
-		if m.terminalScrollback > 0 {
-			header += fmt.Sprintf("  y:%d/%d", m.terminalScrollY, m.terminalScrollback)
-		}
+	if m.sessionScrollback[id] > 0 {
+		header += fmt.Sprintf("  y:%d/%d", m.sessionScrollY[id], m.sessionScrollback[id])
+	}
+	headerColor := t.Muted
+	if active {
+		headerColor = t.Primary
 	}
 	headerStyle := lipgloss.NewStyle().Width(width).Height(embeddedHeaderHeight).
-		Foreground(lipgloss.Color(t.Primary)).Background(lipgloss.Color(t.Panel)).Bold(true)
+		Foreground(lipgloss.Color(headerColor)).Background(lipgloss.Color(t.Panel)).Bold(active)
+	renderedHeader := headerStyle.Render(trimRunes(header, width))
+	if height <= embeddedHeaderHeight {
+		return renderedHeader
+	}
 	background := session.BackgroundColor()
 	if background == nil {
 		background = lipgloss.Color(t.Background)
 	}
 	terminalScreen := renderTerminalScreen(screen, background, width, height-embeddedHeaderHeight)
-	content := lipgloss.JoinVertical(lipgloss.Left, headerStyle.Render(trimRunes(header, width)), terminalScreen)
-	return content, true
+	return lipgloss.JoinVertical(lipgloss.Left, renderedHeader, terminalScreen)
+}
+
+func (m *Model) terminalWorkspaceContent(t theme.Theme, width, height int) string {
+	if width <= 0 || height <= 0 {
+		return ""
+	}
+	toolbar := m.renderTerminalToolbar(t, width)
+	if height <= terminalToolbarHeight {
+		return toolbar
+	}
+	tab := m.terminalWorkspace.activeTab()
+	if tab == nil || tab.Root == nil {
+		body := renderTerminalScreen("\n  No terminal panes · click ＋ NEW", lipgloss.Color(t.Background), width, height-terminalToolbarHeight)
+		return lipgloss.JoinVertical(lipgloss.Left, toolbar, body)
+	}
+	body := m.renderTerminalNode(tab.Root, t, width, height-terminalToolbarHeight)
+	return lipgloss.JoinVertical(lipgloss.Left, toolbar, body)
+}
+
+func (m *Model) renderTerminalToolbar(t theme.Theme, width int) string {
+	spans := m.terminalWorkspace.toolbarSpans(width)
+	parts := make([]string, 0, len(spans)*2+1)
+	x := 0
+	background := lipgloss.Color(t.Panel)
+	for _, span := range spans {
+		if span.Start > x {
+			parts = append(parts, lipgloss.NewStyle().Width(span.Start-x).Background(background).Render(""))
+		}
+		foreground := t.Secondary
+		segmentBackground := t.Panel
+		bold := true
+		if span.Kind == terminalToolbarTab {
+			foreground = t.Muted
+			bold = false
+			if span.Tab == m.terminalWorkspace.ActiveTab {
+				foreground = t.Primary
+				segmentBackground = t.Selection
+				bold = true
+			}
+		} else if span.Kind == terminalToolbarClose {
+			foreground = t.Danger
+		}
+		parts = append(parts, lipgloss.NewStyle().Width(span.End-span.Start).
+			Foreground(lipgloss.Color(foreground)).Background(lipgloss.Color(segmentBackground)).Bold(bold).
+			Render(trimRunes(span.Label, span.End-span.Start)))
+		x = span.End
+	}
+	if x < width {
+		parts = append(parts, lipgloss.NewStyle().Width(width-x).Background(background).Render(""))
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
+}
+
+func (m *Model) renderTerminalNode(node *terminalLayoutNode, t theme.Theme, width, height int) string {
+	if width <= 0 || height <= 0 {
+		return ""
+	}
+	if node == nil {
+		return renderTerminalScreen("", lipgloss.Color(t.Background), width, height)
+	}
+	if node.leaf() {
+		if session := m.sessions[node.SessionID]; session != nil {
+			return m.embeddedSessionContent(session, node.SessionID, t, width, height, node.SessionID == m.terminalWorkspace.activeSessionID())
+		}
+		mode := "CLOSED"
+		message := "Click this pane to restart"
+		if m.starting[node.SessionID] {
+			mode = "STARTING"
+			message = "Starting embedded shell…"
+		}
+		headerColor := t.Muted
+		if node.SessionID == m.terminalWorkspace.activeSessionID() {
+			headerColor = t.Primary
+		}
+		headerText := fmt.Sprintf(" Terminal %d  [%s]", terminalSessionNumber(node.SessionID), mode)
+		header := lipgloss.NewStyle().Width(width).Foreground(lipgloss.Color(headerColor)).Background(lipgloss.Color(t.Panel)).Bold(true).
+			Render(trimRunes(headerText, width))
+		if height <= embeddedHeaderHeight {
+			return header
+		}
+		body := renderTerminalScreen("\n  "+message, lipgloss.Color(t.Background), width, height-embeddedHeaderHeight)
+		return lipgloss.JoinVertical(lipgloss.Left, header, body)
+	}
+	dividerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Border)).Background(lipgloss.Color(t.Panel))
+	if node.Axis == terminalSplitVertical {
+		firstWidth, dividerWidth, secondWidth := terminalSplitSizes(width)
+		first := m.renderTerminalNode(node.First, t, firstWidth, height)
+		second := m.renderTerminalNode(node.Second, t, secondWidth, height)
+		if firstWidth == 0 {
+			return second
+		}
+		if secondWidth == 0 {
+			return first
+		}
+		if dividerWidth == 0 {
+			return lipgloss.JoinHorizontal(lipgloss.Top, first, second)
+		}
+		divider := dividerStyle.Width(dividerWidth).Height(height).Render(strings.Repeat("│\n", max(height-1, 0)) + "│")
+		return lipgloss.JoinHorizontal(lipgloss.Top, first, divider, second)
+	}
+	firstHeight, dividerHeight, secondHeight := terminalSplitSizes(height)
+	first := m.renderTerminalNode(node.First, t, width, firstHeight)
+	second := m.renderTerminalNode(node.Second, t, width, secondHeight)
+	if firstHeight == 0 {
+		return second
+	}
+	if secondHeight == 0 {
+		return first
+	}
+	if dividerHeight == 0 {
+		return lipgloss.JoinVertical(lipgloss.Left, first, second)
+	}
+	divider := dividerStyle.Width(width).Render(strings.Repeat("─", max(width, 1)))
+	return lipgloss.JoinVertical(lipgloss.Left, first, divider, second)
 }
 
 // renderTerminalScreen makes the embedded terminal a complete rectangle. The
@@ -613,20 +905,33 @@ func (m *Model) embeddedCursor() *tea.Cursor {
 	}
 	x := cursor.X
 	y := cursor.Y
-	if id == shellSessionID {
-		y += m.terminalScrollY
-		width, height := m.embeddedDimensions()
-		if x < 0 || x >= width {
+	width, height := m.embeddedDimensions()
+	paneX, paneY := 0, 0
+	if m.page == pageTerminal {
+		pane, ok := m.terminalWorkspace.paneRect(id, m.mainPaneWidth(), m.mainContentHeight())
+		if !ok {
 			return nil
 		}
-		if y < 0 || y >= height {
+		paneX, paneY = pane.X, pane.Y
+		width, height = pane.Width, pane.Height-embeddedHeaderHeight
+		if height <= 0 {
 			return nil
 		}
+	}
+	if scrollY := m.sessionScrollY[id]; scrollY > 0 {
+		y += scrollY
+	}
+	if x < 0 || x >= width {
+		return nil
+	}
+	if y < 0 || y >= height {
+		return nil
 	}
 	if m.sidebarDrawn() {
 		x += sidebarWidth
 	}
-	y += m.topHeight() + embeddedHeaderHeight
+	x += paneX
+	y += m.topHeight() + paneY + embeddedHeaderHeight
 	result := tea.NewCursor(x, y)
 	result.Blink = cursor.Blink
 	result.Color = cursor.Color

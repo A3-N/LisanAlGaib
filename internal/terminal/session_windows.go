@@ -120,6 +120,7 @@ func (s *Session) Resize(width, height int) error {
 }
 func (s *Session) SendKey(key uv.KeyEvent)       { sendKey(s.emulator, key) }
 func (s *Session) SendText(value string)         { s.emulator.SendText(value) }
+func (s *Session) Paste(value string)            { s.emulator.Paste(value) }
 func (s *Session) SendMouse(event uv.MouseEvent) { s.emulator.SendMouse(event) }
 func (s *Session) Focus()                        { s.emulator.Focus() }
 func (s *Session) Blur()                         { s.emulator.Blur() }

@@ -213,6 +213,13 @@ func (s *Session) SendText(value string) {
 	s.emulator.SendText(value)
 }
 
+// Paste forwards one host paste operation to the child. The emulator adds
+// bracketed-paste markers when the child has requested them, preserving the
+// distinction between pasted text and individually typed keys.
+func (s *Session) Paste(value string) {
+	s.emulator.Paste(value)
+}
+
 func (s *Session) SendMouse(event uv.MouseEvent) {
 	s.emulator.SendMouse(event)
 }
