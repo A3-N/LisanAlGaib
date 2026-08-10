@@ -42,7 +42,7 @@ _Virtual machine running Ubuntu._
 ![Windows Docker workspace](./img/pwsh2.png)
 ### MacOS (docker)
 ![macOS Docker workspace](./img/mac2.png)
-_I would not recommend installing with the `vm` argument on your host, as this removes the isolation and defeats the purpose. _
+_I would not recommend installing with the `vm` argument on your host, as this removes the isolation and defeats the purpose._
 
 ---
 ## Quick start
@@ -67,6 +67,18 @@ lisan config
 lisan docker
 ```
 _Might need script exec bypass as well as signing the binary, should you use a release._
+
+**Shared Folder Location:**
+```
+Windows:
+%LOCALAPPDATA%\lisanalgaib\shared
+
+macOS:
+~/Library/Application Support/lisanalgaib/shared
+
+Linux:
+~/.config/lisanalgaib/shared
+```
 
 ---
 ## Commands
@@ -99,7 +111,7 @@ go run cmd/lisan/main.go help
 `help` helps. 
 
 ![Terminal session](./img/term1.png)
-_After running the `docker/vm_` argument, the tool will make use of your terminal session until `CTRL+C` on the overview page. 
+_After running the `docker/vm_` argument, the tool will make use of your terminal session until `CTRL+C` on the overview page._
 ![macOS terminal session](./img/mac1.png)
 
 ---
