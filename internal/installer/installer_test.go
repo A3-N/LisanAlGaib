@@ -81,15 +81,16 @@ func TestUserAssetsFollowActiveProfile(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", config)
 	profile := appconfig.ProfileFromPreset(appconfig.Presets[3], time.Now())
 	profile.Set(appconfig.Features, "agents", true)
-	profile.Set(appconfig.Agents, "codex", true)
+	profile.Set(appconfig.Agents, "omp", true)
 	if err := SeedUserAssets(filepath.Join("..", ".."), profile); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(home, "agents", "codex", "AGENTS.md")); err != nil {
-		t.Fatalf("selected Codex workspace was not seeded: %v", err)
+	if _, err := os.Stat(filepath.Join(home, "agents", "omp", "AGENTS.md")); err != nil {
+		t.Fatalf("selected Oh My Pi workspace was not seeded: %v", err)
 	}
 	for _, absent := range []string{
 		filepath.Join(home, "agents", "kimi"),
+		filepath.Join(home, "agents", "codex"),
 		filepath.Join(config, "nvim"),
 	} {
 		if _, err := os.Stat(absent); !os.IsNotExist(err) {

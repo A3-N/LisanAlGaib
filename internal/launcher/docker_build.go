@@ -29,6 +29,7 @@ type dockerBuildPlan struct {
 	OpenCode      bool
 	Claude        bool
 	Kimi          bool
+	OMP           bool
 }
 
 var dockerExtraPackages = map[string][]string{
@@ -95,6 +96,7 @@ func resolveDockerBuildPlan(profile appconfig.Profile) dockerBuildPlan {
 		plan.OpenCode = profile.Agent("opencode")
 		plan.Claude = profile.Agent("claude")
 		plan.Kimi = profile.Agent("kimi")
+		plan.OMP = profile.Agent("omp")
 	}
 	return plan
 }
@@ -119,6 +121,7 @@ func (plan dockerBuildPlan) buildArguments(signature string) []string {
 		{"LISAN_INSTALL_OPENCODE", buildBool(plan.OpenCode)},
 		{"LISAN_INSTALL_CLAUDE", buildBool(plan.Claude)},
 		{"LISAN_INSTALL_KIMI", buildBool(plan.Kimi)},
+		{"LISAN_INSTALL_OMP", buildBool(plan.OMP)},
 	}
 	arguments := []string{"build"}
 	for _, value := range values {

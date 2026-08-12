@@ -377,6 +377,7 @@ func (m *Model) beginConnectorInput(actionID, inputID string) tea.Cmd {
 	default:
 		m.extensionInputEdit = actionID + ":" + inputID
 		m.extensionInputText = values[inputID]
+		m.extensionInputCursor = len(lineGraphemes(m.extensionInputText))
 		m.status = "Editing " + input.Label + " · Enter commits · Esc cancels"
 	}
 	return nil
@@ -440,7 +441,7 @@ func (m *Model) activateExtensionControl(index int) tea.Cmd {
 	}
 }
 
-func (m *Model) handleExtensionInputKey(key string) tea.Cmd {
+func (m *Model) handleExtensionInputKey(key string, committed ...string) tea.Cmd {
 	parts := strings.SplitN(m.extensionInputEdit, ":", 2)
 	if len(parts) != 2 {
 		m.extensionInputEdit = ""
@@ -450,23 +451,24 @@ func (m *Model) handleExtensionInputKey(key string) tea.Cmd {
 	case "esc":
 		m.extensionInputEdit = ""
 		m.extensionInputText = ""
+		m.extensionInputCursor = 0
 		m.status = "Extension input edit cancelled"
 	case "enter":
 		m.connectorInputs[m.selectedConnector][parts[0]][parts[1]] = m.extensionInputText
 		m.extensionInputEdit = ""
 		m.extensionInputText = ""
+		m.extensionInputCursor = 0
 		m.status = "Extension input updated"
-	case "backspace":
-		runes := []rune(m.extensionInputText)
-		if len(runes) > 0 {
-			m.extensionInputText = string(runes[:len(runes)-1])
-		}
-	case "space":
-		m.extensionInputText += " "
 	default:
-		if runes := []rune(key); len(runes) == 1 && runes[0] >= 0x20 {
-			m.extensionInputText += key
+		text := ""
+		if len(committed) > 0 {
+			text = committed[0]
+		} else if printableLineInput(key) {
+			text = key
 		}
+		m.extensionInputText, m.extensionInputCursor, _ = editLineWithText(
+			m.extensionInputText, m.extensionInputCursor, key, text,
+		)
 	}
 	return nil
 }
@@ -492,6 +494,7 @@ func (m *Model) openOrCaptureConnectorSession() tea.Cmd {
 	current, hasCurrent := m.connectorSessions[connectorID]
 	if hasCurrent && current.SessionID == m.selectedSession && current.Status == "open" {
 		m.extensionSessionCapture = true
+		m.extensionSessionCursor = len(lineGraphemes(m.extensionSessionInput))
 		m.status = "Extension session input active · Ctrl-G returns to wrapper"
 		return nil
 	}
@@ -509,17 +512,10 @@ func (m *Model) openOrCaptureConnectorSession() tea.Cmd {
 	}
 }
 
-func (m *Model) handleExtensionSessionKey(key string) tea.Cmd {
+func (m *Model) handleExtensionSessionKey(key string, committed ...string) tea.Cmd {
 	if key == "ctrl+g" || key == "esc" {
 		m.extensionSessionCapture = false
 		m.status = "Wrapper controls active"
-		return nil
-	}
-	if key == "backspace" {
-		runes := []rune(m.extensionSessionInput)
-		if len(runes) > 0 {
-			m.extensionSessionInput = string(runes[:len(runes)-1])
-		}
 		return nil
 	}
 	if key == "enter" {
@@ -533,11 +529,15 @@ func (m *Model) handleExtensionSessionKey(key string) tea.Cmd {
 			return connectorSessionMsg{ConnectorID: connectorID, Session: session, ClearInput: true, Capture: true, Err: err}
 		}
 	}
-	if key == "space" {
-		m.extensionSessionInput += " "
-	} else if runes := []rune(key); len(runes) == 1 && runes[0] >= 0x20 {
-		m.extensionSessionInput += key
+	text := ""
+	if len(committed) > 0 {
+		text = committed[0]
+	} else if printableLineInput(key) {
+		text = key
 	}
+	m.extensionSessionInput, m.extensionSessionCursor, _ = editLineWithText(
+		m.extensionSessionInput, m.extensionSessionCursor, key, text,
+	)
 	return nil
 }
 

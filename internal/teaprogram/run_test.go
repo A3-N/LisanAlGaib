@@ -21,7 +21,7 @@ func TestSequenceFilterRemovesOnlyUnsupportedSequences(t *testing.T) {
 	if written != len(input) {
 		t.Fatalf("reported %d bytes written, want %d", written, len(input))
 	}
-	if got, want := output.String(), "beforemiddleafter\x1b[31m"; got != want {
+	if got, want := output.String(), "before"+ansi.SetModifyOtherKeys2+"middle"+ansi.ResetModifyOtherKeys+"after\x1b[31m"; got != want {
 		t.Fatalf("filtered output = %q, want %q", got, want)
 	}
 }

@@ -45,7 +45,7 @@ func Environment(base []string, overrides ...string) []string {
 }
 
 // EnvironmentWithout removes variables which would make a nested application
-// believe it can speak directly to the outer Kitty/Tmux/Neovim instance.
+// believe it can speak directly to an outer terminal, multiplexer, or editor.
 func EnvironmentWithout(base []string, keys ...string) []string {
 	result := make([]string, 0, len(base))
 	for _, item := range base {
@@ -60,6 +60,24 @@ func EnvironmentWithout(base []string, keys ...string) []string {
 		if !remove {
 			result = append(result, item)
 		}
+	}
+	return result
+}
+
+// EnvironmentWithoutPrefix removes a family of outer-runtime variables. This
+// is useful when TERM_PROGRAM identifies the launch terminal but its private
+// integration variables are not known in advance.
+func EnvironmentWithoutPrefix(base []string, prefix string) []string {
+	if prefix == "" {
+		return append([]string(nil), base...)
+	}
+	result := make([]string, 0, len(base))
+	for _, item := range base {
+		itemKey, _, _ := strings.Cut(item, "=")
+		if strings.HasPrefix(strings.ToUpper(itemKey), strings.ToUpper(prefix)) {
+			continue
+		}
+		result = append(result, item)
 	}
 	return result
 }

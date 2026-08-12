@@ -96,8 +96,18 @@ func (m *Model) handleTerminalEvent(msg terminalEventMsg) tea.Cmd {
 		m.syncSessionVerticalScroll(msg.Session)
 		return waitTerminalCmd(msg.Session)
 	}
+	if msg.Event.Kind == terminalhost.ClipboardEvent {
+		if m.currentSessionID() != msg.ID {
+			return waitTerminalCmd(msg.Session)
+		}
+		m.status = fmt.Sprintf("%s copied %d bytes", msg.Session.Name(), len(msg.Event.Text))
+		return tea.Batch(waitTerminalCmd(msg.Session), tea.SetClipboard(msg.Event.Text))
+	}
 	delete(m.sessionScrollY, msg.ID)
 	delete(m.sessionScrollback, msg.ID)
+	if m.copy.Active && m.copy.SessionID == msg.ID {
+		m.copy = terminalCopyState{}
+	}
 	if msg.ID == editorSessionID {
 		m.editorPath = ""
 		if m.page == pageFile && msg.Event.Err == nil {
@@ -160,23 +170,70 @@ func (m *Model) beginSession(spec terminalhost.Spec) tea.Cmd {
 }
 
 func childEnvironment() []string {
+	outerProgram := strings.TrimSpace(os.Getenv("TERM_PROGRAM"))
 	base := terminalhost.EnvironmentWithout(
 		os.Environ(),
-		"KITTY_LISTEN_ON",
-		"KITTY_PID",
-		"KITTY_PUBLIC_KEY",
-		"KITTY_WINDOW_ID",
+		"ALACRITTY_LOG",
+		"ALACRITTY_SOCKET",
+		"ALACRITTY_WINDOW_ID",
+		"CMUX_REMOTE_TRANSPORT",
+		"CMUX_SURFACE_ID",
+		"CMUX_WORKSPACE_ID",
+		"GHOSTTY_BIN_DIR",
+		"GHOSTTY_RESOURCES_DIR",
+		"HERDR_ENV",
+		"ITERM_PROFILE",
+		"ITERM_SESSION_ID",
+		"KONSOLE_DBUS_SERVICE",
+		"KONSOLE_DBUS_SESSION",
+		"KONSOLE_VERSION",
+		"LC_TERMINAL",
+		"LC_TERMINAL_VERSION",
 		"NVIM",
 		"NVIM_LISTEN_ADDRESS",
 		"STY",
+		"TERM_FEATURES",
+		"TERM_PROGRAM",
+		"TERM_PROGRAM_VERSION",
+		"TERM_SESSION_ID",
 		"TMUX",
+		"TMUX_PANE",
+		"VSCODE_INJECTION",
+		"VSCODE_PID",
+		"VTE_VERSION",
+		"WEZTERM_EXECUTABLE",
+		"WEZTERM_PANE",
+		"WINDOWID",
+		"WT_PROFILE_ID",
+		"WT_SESSION",
+		"ZELLIJ",
+		"ZELLIJ_PANE_ID",
+		"ZELLIJ_SESSION_NAME",
 	)
+	if outerProgram != "" {
+		base = terminalhost.EnvironmentWithoutPrefix(base, strings.ToUpper(outerProgram)+"_")
+	}
 	return terminalhost.Environment(
 		base,
 		"TERM=xterm-256color",
 		"COLORTERM=truecolor",
 		"TERM_PROGRAM=LisanAlGaib",
 		"LISAN_EMBEDDED=1",
+	)
+}
+
+// agentEnvironment adds only compatibility switches understood by a specific
+// Mentat. The common child environment above remains a truthful description of
+// Lisan's virtual terminal rather than of the outer host terminal.
+func agentEnvironment(base []string, id string) []string {
+	if id != "omp" {
+		return base
+	}
+	return terminalhost.Environment(
+		base,
+		"PI_NO_DECCARA=1",
+		"PI_NO_SYNC_OUTPUT=1",
+		"PI_TUI_RESIZE_IN_PLACE=0",
 	)
 }
 
@@ -313,6 +370,9 @@ func terminalSessionNumber(id string) int {
 }
 
 func (m *Model) newTerminalTab() tea.Cmd {
+	if m.copy.Active {
+		m.copy = terminalCopyState{}
+	}
 	if previous, _ := m.visibleSession(); previous != nil {
 		previous.Blur()
 	}
@@ -324,6 +384,9 @@ func (m *Model) newTerminalTab() tea.Cmd {
 }
 
 func (m *Model) splitTerminal(axis terminalSplitAxis) tea.Cmd {
+	if m.copy.Active {
+		m.copy = terminalCopyState{}
+	}
 	active := m.terminalWorkspace.activeSessionID()
 	if active == "" {
 		return m.newTerminalTab()
@@ -359,6 +422,9 @@ func (m *Model) closeActiveTerminal() tea.Cmd {
 		m.status = "No terminal pane to close"
 		return nil
 	}
+	if m.copy.Active && m.copy.SessionID == closed {
+		m.copy = terminalCopyState{}
+	}
 	if session := m.sessions[closed]; session != nil {
 		session.Close()
 		delete(m.sessions, closed)
@@ -388,6 +454,9 @@ func (m *Model) activateTerminalTab(index int) tea.Cmd {
 	if next == "" {
 		return nil
 	}
+	if m.copy.Active && m.copy.SessionID != next {
+		m.copy = terminalCopyState{}
+	}
 	if previous != next {
 		if session := m.sessions[previous]; session != nil {
 			session.Blur()
@@ -404,10 +473,24 @@ func (m *Model) activateTerminalTab(index int) tea.Cmd {
 	return m.ensureShellSession(next)
 }
 
+func (m *Model) cycleTerminalTab(delta int) tea.Cmd {
+	if len(m.terminalWorkspace.Tabs) == 0 {
+		return nil
+	}
+	index := (m.terminalWorkspace.ActiveTab + delta) % len(m.terminalWorkspace.Tabs)
+	if index < 0 {
+		index += len(m.terminalWorkspace.Tabs)
+	}
+	return m.activateTerminalTab(index)
+}
+
 func (m *Model) activateTerminalPane(id string, capture bool) bool {
 	previous := m.terminalWorkspace.activeSessionID()
 	if !m.terminalWorkspace.activatePane(id) {
 		return false
+	}
+	if m.copy.Active && m.copy.SessionID != id {
+		m.copy = terminalCopyState{}
 	}
 	if previous != id {
 		if session := m.sessions[previous]; session != nil {
@@ -473,7 +556,7 @@ func (m *Model) ensureAgent(id string) tea.Cmd {
 		m.status = tool.Name + " is not installed; its wrapper page shows setup guidance"
 		return nil
 	}
-	environment := childEnvironment()
+	environment := agentEnvironment(childEnvironment(), tool.ID)
 	if shell, _ := shellForContext(m.profile); shell != "" {
 		environment = terminalhost.Environment(environment, "SHELL="+shell)
 	}
@@ -483,6 +566,9 @@ func (m *Model) ensureAgent(id string) tea.Cmd {
 		Path: tool.Path,
 		Dir:  agentWorkingDir(m.root, tool.ID),
 		Env:  environment,
+		Input: terminalhost.InputPolicy{
+			WaitForBracketedPaste: true,
+		},
 	})
 }
 
@@ -601,7 +687,7 @@ func (m *Model) syncSessionVerticalScroll(session *terminalhost.Session) {
 	}
 	id := session.ID()
 	limit := session.ScrollbackLen()
-	if m.sessionScrollY[id] > 0 && limit > m.sessionScrollback[id] {
+	if (m.sessionScrollY[id] > 0 || m.copy.Active && m.copy.SessionID == id) && limit > m.sessionScrollback[id] {
 		m.sessionScrollY[id] += limit - m.sessionScrollback[id]
 	}
 	m.sessionScrollY[id] = min(max(m.sessionScrollY[id], 0), limit)
@@ -710,6 +796,8 @@ func (m *Model) embeddedSessionContent(session *terminalhost.Session, id string,
 	mode := "WRAPPER"
 	if !active {
 		mode = "IDLE"
+	} else if m.copy.Active && m.copy.SessionID == id {
+		mode = "COPY"
 	} else if m.capture {
 		mode = "INPUT"
 	}
@@ -720,7 +808,11 @@ func (m *Model) embeddedSessionContent(session *terminalhost.Session, id string,
 	if childTitle := session.Title(); childTitle != "" && childTitle != title {
 		title += " · " + childTitle
 	}
-	screen, effective, limit := session.RenderViewport(m.sessionScrollY[id])
+	var selection *terminalhost.ViewportSelection
+	if m.copy.Active && m.copy.SessionID == id && m.copy.HasSelection {
+		selection = &terminalhost.ViewportSelection{Start: m.copy.Anchor, End: m.copy.Focus}
+	}
+	screen, _, effective, limit := session.RenderViewportSelection(m.sessionScrollY[id], selection)
 	m.sessionScrollY[id] = effective
 	m.sessionScrollback[id] = limit
 	header := fmt.Sprintf(" %s  [%s]", title, mode)
@@ -729,6 +821,9 @@ func (m *Model) embeddedSessionContent(session *terminalhost.Session, id string,
 	}
 	if m.sessionScrollback[id] > 0 {
 		header += fmt.Sprintf("  y:%d/%d", m.sessionScrollY[id], m.sessionScrollback[id])
+	}
+	if m.copy.Active && m.copy.SessionID == id {
+		header += "  Enter/Y copies · Esc cancels"
 	}
 	headerColor := t.Muted
 	if active {
@@ -918,8 +1013,8 @@ func (m *Model) embeddedCursor() *tea.Cursor {
 			return nil
 		}
 	}
-	if scrollY := m.sessionScrollY[id]; scrollY > 0 {
-		y += scrollY
+	if m.copy.Active && m.copy.SessionID == id || m.sessionScrollY[id] > 0 {
+		return nil
 	}
 	if x < 0 || x >= width {
 		return nil

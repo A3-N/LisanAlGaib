@@ -33,5 +33,16 @@
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+.netrc
+.npmrc
+.pypirc
+credentials.json
+*.har
+*.pcap
+*.pcapng
 *.swp
 coverage.out

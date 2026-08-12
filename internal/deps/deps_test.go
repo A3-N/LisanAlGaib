@@ -2,7 +2,6 @@ package deps
 
 import (
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -91,27 +90,83 @@ func TestDockerTerminalRequiresConfiguredShell(t *testing.T) {
 func TestAgentSelectionRequiresOnlySelectedAgent(t *testing.T) {
 	profile := appconfig.ProfileFromPreset(appconfig.Presets[3], time.Now())
 	profile.Set(appconfig.Features, "agents", true)
-	profile.Set(appconfig.Agents, "codex", true)
+	profile.Set(appconfig.Agents, "omp", true)
 	required := required(profile)
 	seen := map[string]bool{}
 	for _, item := range required {
 		seen[item.ID] = true
 	}
-	if !seen["codex"] || seen["npm"] || seen["bash"] || seen["claude"] || seen["nvim"] {
+	if !seen["omp"] || seen["npm"] || seen["bash"] || seen["claude"] || seen["codex"] || seen["nvim"] {
 		t.Fatalf("agent requirements leaked disabled components: %#v", required)
 	}
 }
 
 func TestAgentInstallerPrerequisitesAreConditional(t *testing.T) {
-	missing := []requirement{{ID: "codex", Command: "codex"}}
+	missing := []requirement{{ID: "codex", Command: "codex"}, {ID: "opencode", Command: "opencode"}}
 	available := func(string) (string, error) { return "/available", nil }
-	if got := withInstallerPrerequisites("linux", missing, available); len(got) != 1 {
-		t.Fatalf("available npm still became a configured requirement: %#v", got)
+	if got := withInstallerPrerequisites("linux", missing, available); len(got) != len(missing) {
+		t.Fatalf("available installer tools still became configured requirements: %#v", got)
 	}
 	unavailable := func(string) (string, error) { return "", os.ErrNotExist }
 	got := withInstallerPrerequisites("linux", missing, unavailable)
-	if len(got) != 2 || got[1].ID != "npm" {
-		t.Fatalf("missing npm was not added for a missing Codex installer: %#v", got)
+	seen := map[string]bool{}
+	for _, item := range got {
+		seen[item.ID] = true
+	}
+	if !seen["curl"] || !seen["bash"] || seen["npm"] {
+		t.Fatalf("standalone installer prerequisites are incorrect: %#v", got)
+	}
+}
+
+func TestOhMyPiInstallerUsesOfficialDownloadedScript(t *testing.T) {
+	missing := []requirement{{ID: "omp", Command: "omp"}}
+	unavailable := func(string) (string, error) { return "", os.ErrNotExist }
+	got := withInstallerPrerequisites("linux", missing, unavailable)
+	if len(got) != 2 || got[1].ID != "curl" {
+		t.Fatalf("missing curl was not added for Oh My Pi: %#v", got)
+	}
+	unixCommand, unixErr := agentInstall("linux", "omp")
+	windowsCommand, windowsErr := agentInstall("windows", "omp")
+	if unixErr != nil || windowsErr != nil {
+		t.Fatalf("Oh My Pi installer mapping failed: unix=%v windows=%v", unixErr, windowsErr)
+	}
+	unix := strings.Join(unixCommand.Args, " ")
+	windows := strings.Join(windowsCommand.Args, " ")
+	if !strings.Contains(unix, "https://omp.sh/install") || !strings.Contains(unix, "--binary") ||
+		!strings.Contains(windows, "https://omp.sh/install.ps1") || !strings.Contains(windows, "-Binary") {
+		t.Fatalf("Oh My Pi installers are not official: unix=%q windows=%q", unix, windows)
+	}
+}
+
+func TestAgentInstallersNeverUseNPMFallbacks(t *testing.T) {
+	tests := []struct {
+		goos, id, required string
+	}{
+		{"linux", "codex", "https://chatgpt.com/codex/install.sh"},
+		{"darwin", "opencode", "https://opencode.ai/install"},
+		{"windows", "codex", "https://chatgpt.com/codex/install.ps1"},
+	}
+	for _, test := range tests {
+		command, err := agentInstall(test.goos, test.id)
+		if err != nil {
+			t.Fatalf("%s/%s installer: %v", test.goos, test.id, err)
+		}
+		joined := strings.Join(append(append([]string{command.Name}, command.Args...), command.Env...), " ")
+		if strings.Contains(strings.ToLower(joined), "npm") || !strings.Contains(joined, test.required) {
+			t.Fatalf("%s/%s did not use only its standalone installer: %q", test.goos, test.id, joined)
+		}
+	}
+	windowsOpenCode, err := agentInstall("windows", "opencode")
+	if err != nil || windowsOpenCode.Name != "scoop" {
+		t.Fatalf("Windows OpenCode must use its documented Scoop installer: %#v %v", windowsOpenCode, err)
+	}
+}
+
+func TestAgentInstallerHasNoImplicitFallbackMapping(t *testing.T) {
+	for _, test := range []struct{ goos, id string }{{"plan9", "codex"}, {"linux", "unknown"}} {
+		if _, err := agentInstall(test.goos, test.id); err == nil || !strings.Contains(err.Error(), "no standalone installer") {
+			t.Fatalf("%s/%s did not fail without an explicit installer: %v", test.goos, test.id, err)
+		}
 	}
 }
 
@@ -122,15 +177,6 @@ func TestInstallPlansAreNative(t *testing.T) {
 		if err != nil || len(plan) < 2 {
 			t.Fatalf("%s plan: %#v %v", goos, plan, err)
 		}
-	}
-}
-
-func TestUnixNPMInstallUsesWritableUserPrefix(t *testing.T) {
-	arguments := npmGlobalArgs("linux", "opencode-ai")
-	joined := strings.Join(arguments, " ")
-	home, _ := os.UserHomeDir()
-	if !strings.Contains(joined, "--prefix "+filepath.Join(home, ".local")) {
-		t.Fatalf("npm install would target the system prefix: %q", joined)
 	}
 }
 
@@ -146,8 +192,13 @@ func TestDockerCheckNeverInstallsHostDependencies(t *testing.T) {
 }
 
 func TestAgentInstallersDownloadCompletelyBeforeExecution(t *testing.T) {
-	unix := strings.Join(agentInstall("linux", "claude").Args, " ")
-	windows := strings.Join(agentInstall("windows", "kimi").Args, " ")
+	unixCommand, unixErr := agentInstall("linux", "claude")
+	windowsCommand, windowsErr := agentInstall("windows", "kimi")
+	if unixErr != nil || windowsErr != nil {
+		t.Fatalf("agent installer mapping failed: unix=%v windows=%v", unixErr, windowsErr)
+	}
+	unix := strings.Join(unixCommand.Args, " ")
+	windows := strings.Join(windowsCommand.Args, " ")
 	if strings.Contains(unix, "| bash") || !strings.Contains(unix, `curl -fsSL -o`) {
 		t.Fatalf("Unix installer still streams into an interpreter: %q", unix)
 	}

@@ -15,12 +15,11 @@ import (
 
 var unsupportedSequences = [][]byte{
 	[]byte(ansi.SetTabEvery8Columns),
-	[]byte(ansi.SetModifyOtherKeys2),
-	[]byte(ansi.ResetModifyOtherKeys),
 }
 
-// Run starts a Bubble Tea program without the legacy terminal sequences that
-// conflict with Kitty's native keyboard protocol.
+// Run starts a Bubble Tea program while filtering only output known to damage
+// layout. Keyboard capability negotiation is left intact so the launch
+// terminal can provide the richest input events it supports.
 func Run(model tea.Model, options ...tea.ProgramOption) (tea.Model, error) {
 	output := newTerminalOutput(os.Stdout)
 	options = append(options, tea.WithOutput(output))

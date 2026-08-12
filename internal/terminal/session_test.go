@@ -3,6 +3,7 @@
 package terminal
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -16,10 +17,17 @@ import (
 )
 
 func TestEnvironmentOverridesWithoutDuplicates(t *testing.T) {
-	base := EnvironmentWithout([]string{"KITTY_WINDOW_ID=3", "TERM=old", "A=1", "TERM=older"}, "KITTY_WINDOW_ID")
+	base := EnvironmentWithout([]string{"OUTER_WINDOW_ID=3", "TERM=old", "A=1", "TERM=older"}, "OUTER_WINDOW_ID")
 	environment := Environment(base, "TERM=xterm-256color", "B=2")
 	if strings.Join(environment, ",") != "A=1,TERM=xterm-256color,B=2" {
 		t.Fatalf("unexpected environment: %#v", environment)
+	}
+}
+
+func TestEnvironmentWithoutPrefixIsCaseInsensitive(t *testing.T) {
+	got := EnvironmentWithoutPrefix([]string{"EXAMPLETERM_WINDOW=1", "exampleterm_PID=2", "PATH=/bin"}, "ExampleTerm_")
+	if strings.Join(got, ",") != "PATH=/bin" {
+		t.Fatalf("prefix-filtered environment = %q", got)
 	}
 }
 
@@ -124,11 +132,10 @@ func TestSessionKeyEncoding(t *testing.T) {
 
 func TestSessionPastePreservesBracketedPaste(t *testing.T) {
 	emulator := vt.NewSafeEmulator(20, 4)
-	defer emulator.Close()
-	if _, err := emulator.Write([]byte("\x1b[?2004h")); err != nil {
-		t.Fatal(err)
-	}
-	session := &Session{emulator: emulator}
+	controller := newInputController(emulator, InputPolicy{})
+	session := &Session{emulator: emulator, inputQueue: controller}
+	controller.setMode(ansi.ModeBracketedPaste, true)
+	defer closeTestInputController(emulator, controller)
 	content := "water of life\nspice"
 	want := ansi.BracketedPasteStart + content + ansi.BracketedPasteEnd
 
@@ -142,7 +149,9 @@ func TestSessionPastePreservesBracketedPaste(t *testing.T) {
 		_, err := io.ReadFull(emulator, buffer)
 		result <- readResult{value: string(buffer), err: err}
 	}()
-	session.Paste(content)
+	if err := session.Paste(content); err != nil {
+		t.Fatal(err)
+	}
 
 	select {
 	case got := <-result:
@@ -155,6 +164,188 @@ func TestSessionPastePreservesBracketedPaste(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("paste input was not emitted")
 	}
+}
+
+func TestSessionInputEmitsModifiedEditingKeys(t *testing.T) {
+	emulator := vt.NewSafeEmulator(20, 4)
+	controller := newInputController(emulator, InputPolicy{})
+	session := &Session{emulator: emulator, inputQueue: controller}
+	defer closeTestInputController(emulator, controller)
+	want := "\x1b[1;5D\x1b[1;5C\x17"
+	result := make(chan string, 1)
+	go func() {
+		buffer := make([]byte, len(want))
+		_, _ = io.ReadFull(emulator, buffer)
+		result <- string(buffer)
+	}()
+	for _, key := range []uv.Key{
+		{Code: uv.KeyLeft, Mod: uv.ModCtrl},
+		{Code: uv.KeyRight, Mod: uv.ModCtrl},
+		{Code: uv.KeyBackspace, Mod: uv.ModCtrl},
+	} {
+		if err := session.SendKey(uv.KeyPressEvent(key)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case got := <-result:
+		if got != want {
+			t.Fatalf("modified key stream = %q, want %q", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("modified keys were not emitted")
+	}
+}
+
+func TestMentatPasteWaitsForBracketedPasteNegotiation(t *testing.T) {
+	emulator := vt.NewSafeEmulator(20, 4)
+	controller := newInputController(emulator, InputPolicy{
+		WaitForBracketedPaste: true,
+		PasteReadyTimeout:     time.Second,
+	})
+	session := &Session{emulator: emulator, inputQueue: controller}
+	defer closeTestInputController(emulator, controller)
+
+	content := "first line\nsecond line"
+	want := ansi.BracketedPasteStart + content + ansi.BracketedPasteEnd
+	// TUIs commonly reset optional modes before enabling their final set. An
+	// initial explicit disable must not be mistaken for completed negotiation.
+	controller.setMode(ansi.ModeBracketedPaste, false)
+	result := make(chan string, 1)
+	go func() {
+		buffer := make([]byte, len(want))
+		_, _ = io.ReadFull(emulator, buffer)
+		result <- string(buffer)
+	}()
+	if err := session.Paste(content); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-result:
+		t.Fatalf("paste escaped before mode negotiation: %q", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	controller.setMode(ansi.ModeBracketedPaste, true)
+	select {
+	case got := <-result:
+		if got != want {
+			t.Fatalf("negotiated paste = %q, want %q", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("paste was not released after bracketed-paste negotiation")
+	}
+}
+
+func TestMentatPasteFallsBackWhenBracketedPasteIsUnsupported(t *testing.T) {
+	emulator := vt.NewSafeEmulator(20, 4)
+	controller := newInputController(emulator, InputPolicy{
+		WaitForBracketedPaste: true,
+		PasteReadyTimeout:     20 * time.Millisecond,
+	})
+	session := &Session{emulator: emulator, inputQueue: controller}
+	defer closeTestInputController(emulator, controller)
+
+	content := "plain fallback"
+	result := make(chan string, 1)
+	go func() {
+		buffer := make([]byte, len(content))
+		_, _ = io.ReadFull(emulator, buffer)
+		result <- string(buffer)
+	}()
+	if err := session.Paste(content); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-result:
+		if got != content {
+			t.Fatalf("fallback paste = %q, want %q", got, content)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unsupported bracketed-paste negotiation swallowed input")
+	}
+}
+
+func TestChunkedPasteRemainsAtomicWithAdjacentInput(t *testing.T) {
+	emulator := vt.NewSafeEmulator(20, 4)
+	controller := newInputController(emulator, InputPolicy{})
+	session := &Session{emulator: emulator, inputQueue: controller}
+	controller.setMode(ansi.ModeBracketedPaste, true)
+	defer closeTestInputController(emulator, controller)
+
+	content := strings.Repeat("spice-😀-", 8_000)
+	want := "before" + ansi.BracketedPasteStart + content + ansi.BracketedPasteEnd + "after"
+	type orderedResult struct {
+		value string
+		err   error
+	}
+	result := make(chan orderedResult, 1)
+	go func() {
+		buffer := make([]byte, len(want))
+		_, err := io.ReadFull(emulator, buffer)
+		result <- orderedResult{value: string(buffer), err: err}
+	}()
+	if err := session.SendText("before"); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Paste(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.SendText("after"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-result:
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		if got.value != want {
+			t.Fatal("chunked paste interleaved with adjacent input")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("chunked paste was not delivered")
+	}
+}
+
+func TestPasteBackpressureDoesNotBlockCaller(t *testing.T) {
+	emulator := vt.NewSafeEmulator(20, 4)
+	controller := newInputController(emulator, InputPolicy{MaxPendingBytes: 32})
+	session := &Session{emulator: emulator, inputQueue: controller}
+	defer closeTestInputController(emulator, controller)
+
+	started := time.Now()
+	if err := session.Paste(strings.Repeat("a", 24)); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("paste enqueue blocked for %s", elapsed)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		err := session.Paste(strings.Repeat("b", 16))
+		if errors.Is(err, ErrInputQueueFull) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("unexpected queue error: %v", err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("bounded input queue never applied backpressure")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func closeTestInputController(emulator *vt.SafeEmulator, controller *inputController) {
+	controller.close()
+	if input, ok := emulator.InputPipe().(io.Closer); ok {
+		_ = input.Close()
+	}
+	select {
+	case <-controller.done:
+	case <-time.After(time.Second):
+	}
+	_ = emulator.Close()
 }
 
 func TestSessionRecoversFromOutOfBoundsScrollRegion(t *testing.T) {
@@ -208,6 +399,91 @@ func TestSessionUsesItsWidthForNaturalWrapping(t *testing.T) {
 	if lines[0] != "0123" || lines[1] != "4567" || lines[2] != "89" {
 		t.Fatalf("terminal did not wrap at its real width: %#v", lines)
 	}
+}
+
+func TestViewportSelectionCopiesSoftWrapsWithoutInventingNewlines(t *testing.T) {
+	emulator := vt.NewSafeEmulator(5, 3)
+	session := &Session{emulator: emulator, width: 5, height: 3}
+	session.applyOutput([]byte("abcdefghi"))
+
+	rendered, selected, _, _ := session.RenderViewportSelection(0, &ViewportSelection{
+		Start: ViewportPoint{X: 0, Y: 0},
+		End:   ViewportPoint{X: 3, Y: 1},
+	})
+	if selected != "abcdefghi" {
+		t.Fatalf("soft-wrapped selection = %q", selected)
+	}
+	if !strings.Contains(rendered, "\x1b[7m") {
+		t.Fatalf("selection was not highlighted: %q", rendered)
+	}
+	_, selected, _, _ = session.RenderViewportSelection(0, &ViewportSelection{
+		Start: ViewportPoint{X: 2, Y: 0},
+		End:   ViewportPoint{X: 3, Y: 1},
+	})
+	if selected != "cdefghi" {
+		t.Fatalf("partial soft-wrapped selection = %q", selected)
+	}
+}
+
+func TestViewportSelectionPreservesHardLineBreaksAndWideCells(t *testing.T) {
+	emulator := vt.NewSafeEmulator(8, 3)
+	session := &Session{emulator: emulator, width: 8, height: 3}
+	session.applyOutput([]byte("a😀\r\ndef"))
+
+	_, selected, _, _ := session.RenderViewportSelection(0, &ViewportSelection{
+		Start: ViewportPoint{X: 2, Y: 0}, // continuation cell of the wide glyph
+		End:   ViewportPoint{X: 2, Y: 1},
+	})
+	if selected != "😀\ndef" {
+		t.Fatalf("wide multi-line selection = %q", selected)
+	}
+}
+
+func TestRenderedSnapshotDoesNotEmitBisectedWideGrapheme(t *testing.T) {
+	emulator := vt.NewSafeEmulator(4, 2)
+	session := &Session{emulator: emulator, width: 4, height: 2}
+	session.applyOutput([]byte("ab😀"))
+	emulator.Resize(3, 2)
+
+	for index, line := range strings.Split(session.Render(), "\n") {
+		if width := ansi.StringWidth(line); width > 3 {
+			t.Fatalf("rendered row %d exceeded its three-cell viewport: width=%d row=%q", index, width, line)
+		}
+	}
+}
+
+func TestSessionResizeUpdatesChildPTYGeometry(t *testing.T) {
+	session, err := Start(Spec{
+		ID: "resize-test", Name: "resize test", Path: "/bin/sh",
+		Args: []string{"-c", `trap 'printf "\r\nsize:%s\r\n" "$(stty size)"' WINCH; printf ready; while :; do sleep 1; done`},
+		Dir:  t.TempDir(),
+	}, 40, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	waitForRenderedText(t, session, "ready", 3*time.Second)
+	if err := session.Resize(13, 7); err != nil {
+		t.Fatal(err)
+	}
+	waitForRenderedText(t, session, "size:7 13", 3*time.Second)
+	for index, line := range strings.Split(session.Render(), "\n") {
+		if width := ansi.StringWidth(line); width > 13 {
+			t.Fatalf("resized child row %d exceeded PTY width: width=%d row=%q", index, width, line)
+		}
+	}
+}
+
+func waitForRenderedText(t *testing.T, session *Session, want string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if strings.Contains(session.Render(), want) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("terminal never rendered %q: %q", want, session.Render())
 }
 
 func TestSessionPausePreservesStateWithoutBackgroundWork(t *testing.T) {

@@ -324,7 +324,7 @@ func seedAgentAssets(sourceRoot string, profile appconfig.Profile) error {
 	if err != nil {
 		return err
 	}
-	for _, id := range []string{"codex", "opencode", "claude", "kimi"} {
+	for _, id := range appconfig.AgentIDs() {
 		if !profile.Agent(id) {
 			continue
 		}

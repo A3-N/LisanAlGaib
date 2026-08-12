@@ -19,6 +19,7 @@ ARG LISAN_INSTALL_CODEX=0
 ARG LISAN_INSTALL_OPENCODE=0
 ARG LISAN_INSTALL_CLAUDE=0
 ARG LISAN_INSTALL_KIMI=0
+ARG LISAN_INSTALL_OMP=0
 ARG CODEX_VERSION=0.145.0
 ARG CODEX_SHA256_AMD64=bfaf13c9ba34f2ad764e4a916c49cf7177aeba329cf0f719e2227566fc8d662a
 ARG CODEX_SHA256_ARM64=d384f90bc842450b42bd675feef06a12a46a3b1ca97efcb22566b270e4a11227
@@ -31,10 +32,13 @@ ARG KIMI_SHA256_ARM64=db9c88d0f44420f1245cf745eadb569de18ecd83019ecab888b3028edd
 ARG CLAUDE_VERSION=2.1.223
 ARG CLAUDE_SHA256_AMD64=98226474f802e3094d6a86c5ade8883c16206d0fcb5c400b7401c800063e99d7
 ARG CLAUDE_SHA256_ARM64=60e83d8db0e894d0e54413e5e7daa256d180db660f51e139a51b614fc30cf3ac
+ARG OMP_VERSION=17.2.12
+ARG OMP_SHA256_AMD64=6c75331bf09d5a9e9433bd592b3ee993d751a15d5b7450c1a334cc0684996f30
+ARG OMP_SHA256_ARM64=f176edf8174db252abe1aa6e84df284e1b83b8dd7ef34ac7faf7884a5e172a4c
 
 RUN set -eu; \
     mkdir -p /opt/lisan-agents/bin; \
-    if [ "$LISAN_INSTALL_CODEX$LISAN_INSTALL_OPENCODE$LISAN_INSTALL_CLAUDE$LISAN_INSTALL_KIMI" != "0000" ]; then \
+    if [ "$LISAN_INSTALL_CODEX$LISAN_INSTALL_OPENCODE$LISAN_INSTALL_CLAUDE$LISAN_INSTALL_KIMI$LISAN_INSTALL_OMP" != "00000" ]; then \
       download_packages="ca-certificates curl"; \
       if [ "$LISAN_INSTALL_CODEX$LISAN_INSTALL_OPENCODE" != "00" ]; then \
         download_packages="$download_packages tar"; \
@@ -53,6 +57,7 @@ RUN set -eu; \
         opencode_sha="$OPENCODE_SHA256_AMD64"; \
         kimi_sha="$KIMI_SHA256_AMD64"; \
         claude_sha="$CLAUDE_SHA256_AMD64"; \
+        omp_sha="$OMP_SHA256_AMD64"; \
         ;; \
       arm64) \
         agent_arch=arm64; \
@@ -61,6 +66,7 @@ RUN set -eu; \
         opencode_sha="$OPENCODE_SHA256_ARM64"; \
         kimi_sha="$KIMI_SHA256_ARM64"; \
         claude_sha="$CLAUDE_SHA256_ARM64"; \
+        omp_sha="$OMP_SHA256_ARM64"; \
         ;; \
       *) echo "Unsupported Docker architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
@@ -87,6 +93,13 @@ RUN set -eu; \
       curl -fsSL -o "$temp_dir/claude" "https://downloads.claude.ai/claude-code-releases/${CLAUDE_VERSION}/linux-${agent_arch}/claude"; \
       printf '%s  %s\n' "$claude_sha" "$temp_dir/claude" | sha256sum -c -; \
       install -m 0755 "$temp_dir/claude" /opt/lisan-agents/bin/claude; \
+    fi; \
+    if [ "$LISAN_INSTALL_OMP" = 1 ]; then \
+      omp_file="omp-linux-${agent_arch}"; \
+      curl -fsSL -o "$temp_dir/omp" "https://github.com/can1357/oh-my-pi/releases/download/v${OMP_VERSION}/${omp_file}"; \
+      printf '%s  %s\n' "$omp_sha" "$temp_dir/omp" | sha256sum -c -; \
+      install -m 0755 "$temp_dir/omp" /opt/lisan-agents/bin/omp; \
+      /opt/lisan-agents/bin/omp --version; \
     fi
 
 FROM ubuntu:26.04@sha256:678c6550cc43645e08669028bc177f50be4e7c5b8cca677067b1914d4afc7a03 AS sietch_tabr
@@ -129,6 +142,7 @@ ARG LISAN_INSTALL_NVCHAD=0
 ARG LISAN_INSTALL_NODE=0
 ARG LISAN_INSTALL_GO=0
 ARG LISAN_INSTALL_PYTHON=0
+ARG LISAN_INSTALL_CODEX=0
 ARG LISAN_INSTALL_EXTRA_PACKAGES=
 
 RUN set -eu; \
@@ -145,6 +159,7 @@ RUN set -eu; \
     if [ "$LISAN_INSTALL_NODE" = 1 ]; then packages="$packages nodejs npm"; fi; \
     if [ "$LISAN_INSTALL_GO" = 1 ]; then packages="$packages golang-go"; fi; \
     if [ "$LISAN_INSTALL_PYTHON" = 1 ]; then packages="$packages python3 python3-venv"; fi; \
+    if [ "$LISAN_INSTALL_CODEX" = 1 ]; then packages="$packages bubblewrap"; fi; \
     packages="$packages $LISAN_INSTALL_EXTRA_PACKAGES"; \
     if [ -n "$packages" ]; then \
       apt-get update; \
@@ -153,6 +168,7 @@ RUN set -eu; \
     if command -v fdfind >/dev/null 2>&1; then ln -s /usr/bin/fdfind /usr/local/bin/fd; fi; \
     if command -v batcat >/dev/null 2>&1; then ln -s /usr/bin/batcat /usr/local/bin/bat; fi; \
     if command -v lua5.4 >/dev/null 2>&1 && ! command -v lua >/dev/null 2>&1; then ln -s /usr/bin/lua5.4 /usr/local/bin/lua; fi; \
+    if [ "$LISAN_INSTALL_CODEX" = 1 ]; then command -v bwrap >/dev/null; bwrap --version >/dev/null; fi; \
     rm -rf /var/lib/apt/lists/*; \
     usermod --shell "$LISAN_SHELL_PATH" fremen
 
@@ -174,7 +190,8 @@ RUN chmod 0755 /usr/local/bin/lisan /usr/local/bin/lisan-entrypoint; \
 
 USER fremen
 WORKDIR /home/fremen
-RUN if [ "$LISAN_INSTALL_NVCHAD" = 1 ]; then nvim --headless '+Lazy! install' +qa; fi
+RUN if [ -x /opt/lisan-agents/bin/omp ]; then /opt/lisan-agents/bin/omp --version; fi; \
+    if [ "$LISAN_INSTALL_NVCHAD" = 1 ]; then nvim --headless '+Lazy! install' +qa; fi
 
 # The fingerprint is metadata-only and deliberately last: source/profile
 # changes cannot invalidate the package-install layers through this label.

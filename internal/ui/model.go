@@ -280,9 +280,11 @@ type Model struct {
 	connectorSessionPending map[string]bool
 	extensionInputEdit      string
 	extensionInputText      string
+	extensionInputCursor    int
 	extensionControlCursor  int
 	extensionSessionCapture bool
 	extensionSessionInput   string
+	extensionSessionCursor  int
 	selectedTool            string
 	selectedAgent           string
 	editorPath              string
@@ -296,6 +298,7 @@ type Model struct {
 	starting                map[string]bool
 	terminalWorkspace       terminalWorkspace
 	capture                 bool
+	copy                    terminalCopyState
 	sessionScrollY          map[string]int
 	sessionScrollback       map[string]int
 }
@@ -397,7 +400,7 @@ func firstEnabledConnector(profile appconfig.Profile) string {
 }
 
 func anyAgentEnabled(profile appconfig.Profile) bool {
-	for _, id := range []string{"codex", "opencode", "claude", "kimi"} {
+	for _, id := range appconfig.AgentIDs() {
 		if profile.Agent(id) {
 			return true
 		}
@@ -426,7 +429,7 @@ func inventorySelection(profile appconfig.Profile) inventory.Selection {
 		}
 	}
 	if profile.Feature("agents") {
-		for _, id := range []string{"codex", "opencode", "claude", "kimi"} {
+		for _, id := range appconfig.AgentIDs() {
 			ids[id] = profile.Agent(id)
 		}
 	}
@@ -517,6 +520,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.connectorSessions[msg.ConnectorID] = msg.Session
 		if msg.ClearInput {
 			m.extensionSessionInput = ""
+			m.extensionSessionCursor = 0
 		}
 		if msg.Capture {
 			m.extensionSessionCapture = msg.Session.Status == "open"
@@ -547,20 +551,69 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.handleTerminalStarted(msg)
 	case terminalEventMsg:
 		return m, m.handleTerminalEvent(msg)
+	case tea.ClipboardMsg:
+		return m, m.handlePaste(msg.Content)
+	case tea.FocusMsg:
+		if session, _ := m.visibleSession(); session != nil && m.capture {
+			_ = session.Focus()
+		}
+		return m, nil
+	case tea.BlurMsg:
+		if session, _ := m.visibleSession(); session != nil && m.capture {
+			_ = session.Blur()
+		}
+		return m, nil
 	case tea.MouseClickMsg:
+		if m.copy.Active {
+			return m, m.handleCopyMouse(msg)
+		}
 		if msg.Button == tea.MouseLeft {
 			return m, m.handleClick(msg)
 		}
 		return m, m.forwardMouse(msg)
 	case tea.MouseReleaseMsg:
+		if m.copy.Active {
+			return m, m.handleCopyMouse(msg)
+		}
 		return m, m.forwardMouse(msg)
 	case tea.MouseWheelMsg:
+		if m.copy.Active {
+			return m, m.handleCopyMouse(msg)
+		}
 		return m, m.handleWheel(msg)
 	case tea.MouseMotionMsg:
+		if m.copy.Active {
+			return m, m.handleCopyMouse(msg)
+		}
 		return m, m.forwardMouse(msg)
 	case tea.PasteMsg:
+		if m.copy.Active {
+			m.status = "Exit copy mode before pasting"
+			return m, nil
+		}
 		return m, m.handlePaste(msg.Content)
 	case tea.KeyPressMsg:
+		if m.copy.Active {
+			return m, m.handleCopyKey(msg.String())
+		}
+		if msg.String() == "ctrl+shift+c" {
+			return m, m.enterCopyMode()
+		}
+		if msg.String() == "ctrl+shift+v" {
+			return m, func() tea.Msg { return tea.ReadClipboard() }
+		}
+		if m.page == pageTerminal {
+			switch msg.String() {
+			case "ctrl+shift+t":
+				return m, m.newTerminalTab()
+			case "ctrl+shift+w":
+				return m, m.closeActiveTerminal()
+			case "ctrl+pgup":
+				return m, m.cycleTerminalTab(-1)
+			case "ctrl+pgdown":
+				return m, m.cycleTerminalTab(1)
+			}
+		}
 		if msg.String() == "ctrl+c" {
 			// Embedded terminals own Ctrl-C while they have input capture so a
 			// user can interrupt a child process. Everywhere else, including
@@ -570,12 +623,18 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if m.extensionInputEdit != "" {
-			return m, m.handleExtensionInputKey(msg.String())
+			return m, m.handleExtensionInputKey(msg.String(), msg.Key().Text)
 		}
 		if m.extensionSessionCapture {
-			return m, m.handleExtensionSessionKey(msg.String())
+			return m, m.handleExtensionSessionKey(msg.String(), msg.Key().Text)
 		}
 		if session, id := m.visibleSession(); session != nil && m.capture {
+			if msg.String() == "ctrl+shift+g" {
+				if err := session.SendKey(uv.KeyPressEvent(uv.Key{Code: 'g', Mod: uv.ModCtrl})); err != nil {
+					m.status = "Terminal input unavailable: " + err.Error()
+				}
+				return m, nil
+			}
 			if msg.String() == "ctrl+g" {
 				m.capture = false
 				m.focusSidebar = m.sidebar
@@ -587,7 +646,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.moveSessionVertically(true)
 			}
 			key := uv.Key(msg.Key())
-			session.SendKey(uv.KeyPressEvent(key))
+			if err := session.SendKey(uv.KeyPressEvent(key)); err != nil {
+				m.status = "Terminal input unavailable: " + err.Error()
+			}
 			return m, nil
 		}
 		return m, m.handleKey(msg.String())
@@ -600,18 +661,24 @@ func (m *Model) handlePaste(content string) tea.Cmd {
 		return nil
 	}
 	if m.extensionInputEdit != "" {
-		m.extensionInputText += singleLinePaste(content)
+		m.extensionInputText, m.extensionInputCursor = insertLineText(
+			m.extensionInputText, m.extensionInputCursor, singleLinePaste(content),
+		)
 		return nil
 	}
 	if m.extensionSessionCapture {
-		m.extensionSessionInput += singleLinePaste(content)
+		m.extensionSessionInput, m.extensionSessionCursor = insertLineText(
+			m.extensionSessionInput, m.extensionSessionCursor, singleLinePaste(content),
+		)
 		return nil
 	}
 	if session, id := m.visibleSession(); session != nil && m.capture {
 		if m.sessionScrollY[id] > 0 {
 			m.moveSessionVertically(true)
 		}
-		session.Paste(content)
+		if err := session.Paste(content); err != nil {
+			m.status = "Could not queue paste: " + err.Error()
+		}
 		return nil
 	}
 	if session, _ := m.visibleSession(); session != nil {
@@ -646,6 +713,10 @@ func (m *Model) handleKey(key string) tea.Cmd {
 			m.status = session.Name() + " input active; Ctrl-G returns to the wrapper"
 		}
 		return nil
+	case "c":
+		if session, _ := m.visibleSession(); session != nil {
+			return m.enterCopyMode()
+		}
 	case "ctrl+b":
 		if !m.sectionSupportsSidebar() {
 			m.status = "This page uses its native full-width interface"
@@ -1020,8 +1091,10 @@ func (m *Model) selectSection(next section) tea.Cmd {
 	if next != sectionExtensions {
 		m.extensionInputEdit = ""
 		m.extensionInputText = ""
+		m.extensionInputCursor = 0
 		m.extensionSessionCapture = false
 		m.extensionSessionInput = ""
+		m.extensionSessionCursor = 0
 	}
 	if next != m.section {
 		m.rememberSectionView()
@@ -1084,6 +1157,7 @@ func (m *Model) selectExtension(id string) tea.Cmd {
 			}
 			m.extensionSessionCapture = false
 			m.extensionSessionInput = ""
+			m.extensionSessionCursor = 0
 			m.selectedConnector = id
 			m.page = pageConnector
 			m.capture = false
@@ -1213,6 +1287,9 @@ func (m *Model) restoreExtensionView(id string) {
 }
 
 func (m *Model) blurVisibleSession() {
+	if m.copy.Active {
+		m.copy = terminalCopyState{}
+	}
 	if session, id := m.visibleSession(); session != nil {
 		session.Blur()
 		// NvChad is stateful but normally does not need to make progress while
@@ -1268,6 +1345,7 @@ func (m *Model) activateRow(rows []sidebarRow, index int) tea.Cmd {
 	if row.Kind == rowConnectorView || row.Kind == rowConnectorAction || row.Kind == rowConnectorSession || row.Kind == rowConnectorArtifact {
 		m.extensionSessionCapture = false
 		m.extensionSessionInput = ""
+		m.extensionSessionCursor = 0
 	}
 	switch row.Kind {
 	case rowCategory:

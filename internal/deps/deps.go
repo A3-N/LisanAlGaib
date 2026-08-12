@@ -24,6 +24,7 @@ type requirement struct {
 type installCommand struct {
 	Name string
 	Args []string
+	Env  []string
 }
 
 func required(profile appconfig.Profile) []requirement {
@@ -61,7 +62,7 @@ func required(profile appconfig.Profile) []requirement {
 		add("npm", "npm")
 	}
 	if profile.Feature("agents") {
-		for _, id := range []string{"codex", "opencode", "claude", "kimi"} {
+		for _, id := range appconfig.AgentIDs() {
 			if profile.Agent(id) {
 				add(id, id)
 			}
@@ -168,9 +169,13 @@ func installPlan(goos string, missing []requirement) ([]installCommand, error) {
 	default:
 		return nil, fmt.Errorf("unsupported dependency platform %s", goos)
 	}
-	for _, id := range []string{"codex", "opencode", "claude", "kimi"} {
+	for _, id := range appconfig.AgentIDs() {
 		if agents[id] {
-			commands = append(commands, agentInstall(goos, id))
+			command, err := agentInstall(goos, id)
+			if err != nil {
+				return nil, err
+			}
+			commands = append(commands, command)
 		}
 	}
 	return commands, nil
@@ -228,6 +233,9 @@ func ensure(ctx context.Context, requirements []requirement, output io.Writer) e
 			return fmt.Errorf("%s is required to install configured dependencies: %w", step.Name, err)
 		}
 		command := exec.CommandContext(ctx, step.Name, step.Args...)
+		if len(step.Env) > 0 {
+			command.Env = append(os.Environ(), step.Env...)
+		}
 		childproc.Configure(command)
 		command.Stdin = os.Stdin
 		command.Stdout = output
@@ -244,25 +252,26 @@ func ensure(ctx context.Context, requirements []requirement, output io.Writer) e
 	return nil
 }
 
-// withInstallerPrerequisites adds npm/curl only when an agent is actually
-// missing and its installer command is unavailable. An already-installed
-// native agent therefore never pulls an unused package manager onto the host.
+// withInstallerPrerequisites adds only the commands required by an agent's
+// standalone installer. Agent installation never makes npm a prerequisite.
 func withInstallerPrerequisites(goos string, missing []requirement, lookPath func(string) (string, error)) []requirement {
 	result := append([]requirement(nil), missing...)
 	seen := map[string]bool{}
 	for _, item := range result {
 		seen[item.ID] = true
 	}
-	needsNPM, needsCurl := false, false
+	needsCurl, needsBash := false, false
 	for _, item := range missing {
-		needsNPM = needsNPM || item.ID == "codex" || item.ID == "opencode"
-		needsCurl = needsCurl || (goos != "windows" && (item.ID == "claude" || item.ID == "kimi"))
+		if goos != "windows" && isAgent(item.ID) {
+			needsCurl = true
+		}
+		needsBash = needsBash || (goos != "windows" && item.ID == "opencode")
 	}
 	for _, prerequisite := range []struct {
 		needed  bool
 		id      string
 		command string
-	}{{needsNPM, "npm", "npm"}, {needsCurl, "curl", "curl"}} {
+	}{{needsCurl, "curl", "curl"}, {needsBash, "bash", "bash"}} {
 		if !prerequisite.needed || seen[prerequisite.id] {
 			continue
 		}
@@ -277,7 +286,7 @@ func withInstallerPrerequisites(goos string, missing []requirement, lookPath fun
 
 func packageNames(goos, id string) []string {
 	linux := map[string][]string{
-		"curl": {"curl", "ca-certificates"}, "git": {"git"}, "rg": {"ripgrep"}, "fd": {"fd-find"}, "unzip": {"unzip"}, "nvim": {"neovim"},
+		"bash": {"bash"}, "curl": {"curl", "ca-certificates"}, "git": {"git"}, "rg": {"ripgrep"}, "fd": {"fd-find"}, "unzip": {"unzip"}, "nvim": {"neovim"},
 		"node": {"nodejs", "npm"}, "npm": {"nodejs", "npm"},
 		"go": {"golang-go"}, "python": {"python3", "python3-venv"}, "pip": {"python3-pip"},
 		"rust": {"cargo", "rustc"}, "java": {"default-jdk-headless"}, "clang": {"clang"}, "ruby": {"ruby-full"}, "php": {"php-cli"}, "lua": {"lua5.4"},
@@ -286,7 +295,7 @@ func packageNames(goos, id string) []string {
 		"nmap": {"nmap"}, "mtr": {"mtr-tiny"}, "tcpdump": {"tcpdump"}, "whois": {"whois"},
 	}
 	darwin := map[string][]string{
-		"curl": {"curl"}, "git": {"git"}, "rg": {"ripgrep"}, "fd": {"fd"}, "unzip": {"unzip"}, "nvim": {"neovim"},
+		"bash": {"bash"}, "curl": {"curl"}, "git": {"git"}, "rg": {"ripgrep"}, "fd": {"fd"}, "unzip": {"unzip"}, "nvim": {"neovim"},
 		"node": {"node"}, "npm": {"node"}, "go": {"go"}, "python": {"python"}, "pip": {"python"},
 		"rust": {"rust"}, "java": {"cask:temurin"}, "clang": {"llvm"}, "ruby": {"ruby"}, "php": {"php"}, "lua": {"lua"},
 		"jq": {"jq"}, "wget": {"wget"}, "zip": {"zip"}, "fzf": {"fzf"}, "bat": {"bat"}, "tree": {"tree"}, "shellcheck": {"shellcheck"},
@@ -312,61 +321,136 @@ func packageNames(goos, id string) []string {
 	}
 }
 
-func agentInstall(goos, id string) installCommand {
-	if id == "codex" {
-		return installCommand{Name: "npm", Args: npmGlobalArgs(goos, "@openai/codex")}
-	}
-	if id == "opencode" {
-		return installCommand{Name: "npm", Args: npmGlobalArgs(goos, "opencode-ai")}
+func agentInstall(goos, id string) (installCommand, error) {
+	userBin, err := userBinDirectory()
+	if err != nil {
+		return installCommand{}, err
 	}
 	if goos == "windows" {
-		url := "https://claude.ai/install.ps1"
-		if id == "kimi" {
-			url = "https://code.kimi.com/kimi-code/install.ps1"
+		if id == "opencode" {
+			// OpenCode documents Scoop as a native Windows installer. Do not
+			// fall back to npm when Scoop is unavailable; ensure reports that
+			// missing command as the installation error.
+			return installCommand{Name: "scoop", Args: []string{"install", "opencode"}}, nil
 		}
-		return installCommand{Name: "powershell", Args: []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", windowsAgentInstaller + " '" + url + "'"}}
+		specifications := map[string]struct {
+			URL  string
+			Args []string
+			Env  []string
+		}{
+			"codex": {
+				URL: "https://chatgpt.com/codex/install.ps1",
+				Env: []string{
+					"CODEX_INSTALL_DIR=" + userBin,
+					"CODEX_NON_INTERACTIVE=true",
+					"CODEX_INSTALLER_USE_RELEASES_OPENAI_COM=false",
+				},
+			},
+			"claude": {URL: "https://claude.ai/install.ps1"},
+			"kimi":   {URL: "https://code.kimi.com/kimi-code/install.ps1"},
+			"omp": {
+				URL:  "https://omp.sh/install.ps1",
+				Args: []string{"-Binary"},
+				Env:  []string{"PI_INSTALL_DIR=" + userBin},
+			},
+		}
+		specification, ok := specifications[id]
+		if !ok {
+			return installCommand{}, fmt.Errorf("no standalone installer for agent %s on %s", id, goos)
+		}
+		command := windowsAgentInstallCommand(specification.URL, specification.Args...)
+		command.Env = specification.Env
+		return command, nil
 	}
-	url := "https://claude.ai/install.sh"
-	if id == "kimi" {
-		url = "https://code.kimi.com/kimi-code/install.sh"
+	if goos != "linux" && goos != "darwin" {
+		return installCommand{}, fmt.Errorf("no standalone installer for agent %s on %s", id, goos)
 	}
-	return installCommand{Name: "sh", Args: []string{"-c", unixAgentInstaller, "lisan-agent-install", url}}
+	specifications := map[string]struct {
+		URL         string
+		Interpreter string
+		Args        []string
+		Env         []string
+	}{
+		"codex": {
+			URL:         "https://chatgpt.com/codex/install.sh",
+			Interpreter: "sh",
+			Env: []string{
+				"CODEX_INSTALL_DIR=" + userBin,
+				"CODEX_NON_INTERACTIVE=true",
+				"CODEX_INSTALLER_USE_RELEASES_OPENAI_COM=false",
+			},
+		},
+		"opencode": {
+			URL:         "https://opencode.ai/install",
+			Interpreter: "bash",
+			Args:        []string{"--no-modify-path"},
+			Env:         []string{"OPENCODE_INSTALL_DIR=" + userBin},
+		},
+		"claude": {URL: "https://claude.ai/install.sh", Interpreter: "sh"},
+		"kimi":   {URL: "https://code.kimi.com/kimi-code/install.sh", Interpreter: "sh"},
+		"omp": {
+			URL:         "https://omp.sh/install",
+			Interpreter: "sh",
+			Args:        []string{"--binary"},
+			Env:         []string{"PI_INSTALL_DIR=" + userBin},
+		},
+	}
+	specification, ok := specifications[id]
+	if !ok {
+		return installCommand{}, fmt.Errorf("no standalone installer for agent %s on %s", id, goos)
+	}
+	command := unixAgentInstallCommand(specification.URL, specification.Interpreter, specification.Args...)
+	command.Env = specification.Env
+	return command, nil
 }
 
 const unixAgentInstaller = `set -eu
+url="$1"
+interpreter="$2"
+shift 2
 script="$(mktemp)"
 trap 'unlink "$script"' EXIT
-curl -fsSL -o "$script" "$1"
-sh "$script"`
+curl -fsSL -o "$script" "$url"
+"$interpreter" "$script" "$@"`
 
 const windowsAgentInstaller = `& { param([string]$Uri)
 $Script = Join-Path ([IO.Path]::GetTempPath()) (([IO.Path]::GetRandomFileName()) + '.ps1')
 try {
   Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $Script
-  & $Script
+  & $Script @args
 } finally {
   Remove-Item -LiteralPath $Script -Force -ErrorAction SilentlyContinue
 }
 }`
 
-func npmGlobalArgs(goos, packageName string) []string {
-	arguments := []string{"install", "--global"}
-	if goos != "windows" {
-		if home, err := os.UserHomeDir(); err == nil {
-			arguments = append(arguments, "--prefix", filepath.Join(home, ".local"))
-		}
+func unixAgentInstallCommand(url, interpreter string, arguments ...string) installCommand {
+	args := []string{"-c", unixAgentInstaller, "lisan-agent-install", url, interpreter}
+	return installCommand{Name: "sh", Args: append(args, arguments...)}
+}
+
+func windowsAgentInstallCommand(url string, arguments ...string) installCommand {
+	command := windowsAgentInstaller + " '" + strings.ReplaceAll(url, "'", "''") + "'"
+	for _, argument := range arguments {
+		command += " '" + strings.ReplaceAll(argument, "'", "''") + "'"
 	}
-	return append(arguments, packageName)
+	return installCommand{Name: "powershell", Args: []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command}}
+}
+
+func userBinDirectory() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("locate user home for agent installer: %w", err)
+	}
+	return filepath.Clean(filepath.Join(home, ".local", "bin")), nil
 }
 
 // prepareEnvironment makes per-user agent installs visible to this process and
 // every embedded child without requiring the user to restart their shell.
 func prepareEnvironment() error {
-	home, err := os.UserHomeDir()
+	userBin, err := userBinDirectory()
 	if err != nil {
-		return fmt.Errorf("locate user home for dependency PATH: %w", err)
+		return fmt.Errorf("locate dependency PATH: %w", err)
 	}
-	userBin := filepath.Clean(filepath.Join(home, ".local", "bin"))
 	path := os.Getenv("PATH")
 	for _, entry := range filepath.SplitList(path) {
 		entry = filepath.Clean(entry)
@@ -381,7 +465,12 @@ func prepareEnvironment() error {
 }
 
 func isAgent(id string) bool {
-	return id == "codex" || id == "opencode" || id == "claude" || id == "kimi"
+	for _, candidate := range appconfig.AgentIDs() {
+		if id == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 func missingNames(missing []requirement) string {

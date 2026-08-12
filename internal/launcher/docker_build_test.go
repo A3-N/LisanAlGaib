@@ -30,8 +30,17 @@ func TestDockerBuildPlanResolvesOnlySelectedAndRequiredTools(t *testing.T) {
 	minimal.Set(appconfig.Features, "agents", true)
 	minimal.Set(appconfig.Agents, "codex", true)
 	plan = resolveDockerBuildPlan(minimal)
-	if !plan.Codex || plan.Node || plan.OpenCode || plan.Git {
+	if !plan.Codex || plan.Node || plan.OpenCode || plan.OMP || plan.Git {
 		t.Fatalf("Codex dependencies leaked unrelated tools: %#v", plan)
+	}
+	minimal.Set(appconfig.Agents, "codex", false)
+	minimal.Set(appconfig.Agents, "omp", true)
+	plan = resolveDockerBuildPlan(minimal)
+	if !plan.OMP || plan.Codex || plan.OpenCode || plan.Claude || plan.Kimi {
+		t.Fatalf("Oh My Pi selection leaked other Mentats: %#v", plan)
+	}
+	if arguments := strings.Join(plan.buildArguments("signature"), " "); !strings.Contains(arguments, "LISAN_INSTALL_OMP=1") {
+		t.Fatalf("Oh My Pi selection did not reach Docker build args: %s", arguments)
 	}
 
 	minimal.Set(appconfig.Tools, "rust", true)
@@ -240,6 +249,49 @@ func TestDockerfileInstallsCodexAsPinnedNativeBinary(t *testing.T) {
 	}
 }
 
+func TestDockerfileProvidesCodexSandboxPrerequisite(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dockerfile := string(data)
+	finalStage := strings.LastIndex(dockerfile, "\nFROM ")
+	user := strings.LastIndex(dockerfile, "\nUSER fremen")
+	if finalStage < 0 || user <= finalStage {
+		t.Fatal("Dockerfile final runtime stage is missing")
+	}
+	runtimeRoot := dockerfile[finalStage:user]
+	for _, expected := range []string{
+		"ARG LISAN_INSTALL_CODEX=0",
+		`if [ "$LISAN_INSTALL_CODEX" = 1 ]; then packages="$packages bubblewrap"; fi`,
+		`if [ "$LISAN_INSTALL_CODEX" = 1 ]; then command -v bwrap >/dev/null; bwrap --version >/dev/null; fi`,
+	} {
+		if !strings.Contains(runtimeRoot, expected) {
+			t.Fatalf("Codex runtime sandbox setup omits %q", expected)
+		}
+	}
+}
+
+func TestDockerfileAgentPayloadsNeverInstallWithNPM(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dockerfile := string(data)
+	start := strings.Index(dockerfile, " AS mentat_payloads")
+	if start < 0 {
+		t.Fatal("Dockerfile agent payload stage is missing")
+	}
+	endOffset := strings.Index(dockerfile[start+1:], "\nFROM ")
+	if endOffset < 0 {
+		t.Fatal("Dockerfile agent payload stage has no following stage")
+	}
+	payloadStage := dockerfile[start : start+1+endOffset]
+	if strings.Contains(strings.ToLower(payloadStage), "npm") {
+		t.Fatalf("Docker agent payload stage still uses npm:\n%s", payloadStage)
+	}
+}
+
 func TestDockerfilePinsEveryAgentPayloadWithoutManifestTooling(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "Dockerfile"))
 	if err != nil {
@@ -251,6 +303,7 @@ func TestDockerfilePinsEveryAgentPayloadWithoutManifestTooling(t *testing.T) {
 		"OPENCODE_SHA256_AMD64", "OPENCODE_SHA256_ARM64",
 		"KIMI_SHA256_AMD64", "KIMI_SHA256_ARM64",
 		"CLAUDE_SHA256_AMD64", "CLAUDE_SHA256_ARM64",
+		"OMP_SHA256_AMD64", "OMP_SHA256_ARM64",
 	} {
 		if !strings.Contains(dockerfile, "ARG "+argument+"=") {
 			t.Fatalf("Dockerfile does not pin %s", argument)
@@ -258,6 +311,31 @@ func TestDockerfilePinsEveryAgentPayloadWithoutManifestTooling(t *testing.T) {
 	}
 	if strings.Contains(dockerfile, "manifest.json") || strings.Contains(dockerfile, " jq") {
 		t.Fatal("agent builder still trusts live manifests or installs jq")
+	}
+	ompStart := strings.Index(dockerfile, `if [ "$LISAN_INSTALL_OMP" = 1 ]`)
+	if ompStart < 0 {
+		t.Fatal("Dockerfile Oh My Pi install block is missing")
+	}
+	ompBlock := dockerfile[ompStart:]
+	if !strings.Contains(ompBlock, "github.com/can1357/oh-my-pi/releases/download") ||
+		!strings.Contains(ompBlock, "omp-linux-${agent_arch}") ||
+		strings.Contains(ompBlock, "omp-linux-musl-") ||
+		!strings.Contains(ompBlock, "sha256sum -c") ||
+		!strings.Contains(ompBlock, "/opt/lisan-agents/bin/omp --version") {
+		t.Fatalf("Oh My Pi must be a verified, build-tested glibc download:\n%s", ompBlock)
+	}
+	for _, checksum := range []string{
+		"OMP_SHA256_AMD64=6c75331bf09d5a9e9433bd592b3ee993d751a15d5b7450c1a334cc0684996f30",
+		"OMP_SHA256_ARM64=f176edf8174db252abe1aa6e84df284e1b83b8dd7ef34ac7faf7884a5e172a4c",
+	} {
+		if !strings.Contains(dockerfile, checksum) {
+			t.Fatalf("Dockerfile does not pin the compatible Oh My Pi payload: %s", checksum)
+		}
+	}
+	copyIndex := strings.Index(dockerfile, "COPY --from=mentat_payloads /opt/lisan-agents /opt/lisan-agents")
+	runtimeCheck := strings.LastIndex(dockerfile, "/opt/lisan-agents/bin/omp --version")
+	if copyIndex < 0 || runtimeCheck <= copyIndex {
+		t.Fatal("final Docker runtime does not execute-check the copied Oh My Pi binary")
 	}
 }
 

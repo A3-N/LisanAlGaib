@@ -17,6 +17,7 @@ import (
 	"time"
 
 	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 	"github.com/creack/pty"
 )
@@ -29,6 +30,7 @@ type Session struct {
 	command    *exec.Cmd
 	pty        *os.File
 	emulator   *vt.SafeEmulator
+	inputQueue *inputController
 	input      io.Closer
 	background color.Color
 
@@ -40,6 +42,7 @@ type Session struct {
 	height   int
 
 	frames      chan struct{}
+	clipboard   chan string
 	exit        chan error
 	outputDone  chan struct{}
 	processDone chan struct{}
@@ -93,6 +96,7 @@ func Start(spec Spec, width, height int) (*Session, error) {
 		emulator:      emulator,
 		background:    spec.Background,
 		frames:        make(chan struct{}, 1),
+		clipboard:     make(chan string, 4),
 		exit:          make(chan error, 1),
 		outputDone:    make(chan struct{}),
 		processDone:   make(chan struct{}),
@@ -103,6 +107,7 @@ func Start(spec Spec, width, height int) (*Session, error) {
 		cursorStyle:   vt.CursorBlock,
 		cursorBlink:   true,
 	}
+	session.inputQueue = newInputController(emulator, spec.Input)
 	if input, ok := emulator.InputPipe().(io.Closer); ok {
 		session.input = input
 	}
@@ -135,11 +140,25 @@ func Start(spec Spec, width, height int) (*Session, error) {
 			session.mu.Unlock()
 			session.signalFrame()
 		},
+		EnableMode: func(mode ansi.Mode) {
+			session.inputQueue.setMode(mode, true)
+		},
+		DisableMode: func(mode ansi.Mode) {
+			session.inputQueue.setMode(mode, false)
+		},
+	})
+	registerClipboardHandler(emulator, func(value string) {
+		select {
+		case session.clipboard <- value:
+		default:
+		}
 	})
 
 	ptmx, err := pty.StartWithSize(command, &pty.Winsize{Rows: ptyHeight, Cols: ptyWidth})
 	if err != nil {
+		session.inputQueue.close()
 		_ = emulator.Close()
+		<-session.inputQueue.done
 		return nil, err
 	}
 	session.pty = ptmx
@@ -157,10 +176,6 @@ func (s *Session) Title() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.title
-}
-
-func (s *Session) Render() string {
-	return s.emulator.Render()
 }
 
 func (s *Session) BackgroundColor() color.Color {
@@ -191,41 +206,39 @@ func (s *Session) Resize(width, height int) error {
 		return nil
 	}
 
-	oldWidth, oldHeight := s.width, s.height
-	// Resize the emulator before SIGWINCH reaches the child. NvChad can repaint
-	// immediately from the signal handler, including setting scroll margins for
-	// the new size, so the virtual screen must already match those dimensions.
-	s.emulator.Resize(width, height)
+	// Hold screenMu while changing the PTY and emulator. The reader may collect
+	// an immediate SIGWINCH repaint, but cannot apply it until the virtual screen
+	// has the matching dimensions. Failed OS resizes leave the emulator intact.
 	if err := pty.Setsize(s.pty, &pty.Winsize{Rows: ptyHeight, Cols: ptyWidth}); err != nil {
-		s.emulator.Resize(oldWidth, oldHeight)
 		return err
 	}
+	resizePrimaryScreen(s.emulator, width, height)
 	s.width, s.height = width, height
 	s.signalFrame()
 	return nil
 }
 
-func (s *Session) SendKey(key uv.KeyEvent) {
-	sendKey(s.emulator, key)
+func (s *Session) SendKey(key uv.KeyEvent) error {
+	return s.inputQueue.sendKey(key)
 }
 
-func (s *Session) SendText(value string) {
-	s.emulator.SendText(value)
+func (s *Session) SendText(value string) error {
+	return s.inputQueue.sendText(value)
 }
 
-// Paste forwards one host paste operation to the child. The emulator adds
-// bracketed-paste markers when the child has requested them, preserving the
-// distinction between pasted text and individually typed keys.
-func (s *Session) Paste(value string) {
-	s.emulator.Paste(value)
+// Paste queues one host paste operation. The session waits for a Mentat's
+// bracketed-paste negotiation when configured, then transports the operation
+// in bounded chunks without allowing another input event between its markers.
+func (s *Session) Paste(value string) error {
+	return s.inputQueue.paste(value)
 }
 
-func (s *Session) SendMouse(event uv.MouseEvent) {
-	s.emulator.SendMouse(event)
+func (s *Session) SendMouse(event uv.MouseEvent) error {
+	return s.inputQueue.sendMouse(event)
 }
 
-func (s *Session) Focus() { s.emulator.Focus() }
-func (s *Session) Blur()  { s.emulator.Blur() }
+func (s *Session) Focus() error { return s.inputQueue.focus() }
+func (s *Session) Blur() error  { return s.inputQueue.blur() }
 
 // Pause freezes the complete PTY process group while preserving its process,
 // emulator, and screen state. Hidden panes therefore consume no CPU on Unix.
@@ -259,6 +272,8 @@ func (s *Session) NextEvent() Event {
 	select {
 	case <-s.frames:
 		return Event{Kind: FrameEvent}
+	case value := <-s.clipboard:
+		return Event{Kind: ClipboardEvent, Text: value}
 	case err := <-s.exit:
 		return Event{Kind: ExitEvent, Err: err}
 	}
@@ -272,6 +287,7 @@ func (s *Session) Exited() (bool, error) {
 
 func (s *Session) Close() {
 	s.closeOnce.Do(func() {
+		s.inputQueue.close()
 		s.mu.RLock()
 		exited := s.exited
 		paused := s.paused
@@ -302,13 +318,23 @@ func (s *Session) Close() {
 				}
 			}
 		}
+		inputStopped := false
 		select {
 		case <-s.inputDone:
-			_ = s.emulator.Close()
+			inputStopped = true
 		case <-time.After(500 * time.Millisecond):
-			// The input pipe was closed above. If an upstream reader ever fails
-			// to unblock, retaining the emulator is safer than racing its Close.
 		}
+		controllerStopped := false
+		select {
+		case <-s.inputQueue.done:
+			controllerStopped = true
+		case <-time.After(500 * time.Millisecond):
+		}
+		if inputStopped && controllerStopped {
+			_ = s.emulator.Close()
+		}
+		// Both input users must be gone before closing the emulator. If either
+		// fails to unblock, retaining it is safer than racing its input pipe.
 	})
 }
 
@@ -377,6 +403,7 @@ func (s *Session) wait() {
 	s.exited = true
 	s.exitErr = err
 	s.mu.Unlock()
+	s.inputQueue.close()
 	s.closeIO()
 	close(s.processDone)
 	s.signalFrame()

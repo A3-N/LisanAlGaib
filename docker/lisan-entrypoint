@@ -9,6 +9,7 @@ mkdir -p \
   /home/fremen/agents/opencode \
   /home/fremen/agents/kimi \
   /home/fremen/agents/claude \
+  /home/fremen/agents/omp \
   /home/fremen/projects
 
 seed_file() {
@@ -23,6 +24,7 @@ seed_file agents/codex/AGENTS.md
 seed_file agents/opencode/AGENTS.md
 seed_file agents/kimi/AGENTS.md
 seed_file agents/claude/CLAUDE.md
+seed_file agents/omp/AGENTS.md
 if command -v fish >/dev/null 2>&1; then
   mkdir -p /home/fremen/.config/fish/conf.d
   seed_file .config/fish/config.fish

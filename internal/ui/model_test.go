@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -116,6 +117,83 @@ func TestMinimalProfileOnlyLoadsOverview(t *testing.T) {
 	if len(message.Inventory.Tools) != 0 || len(message.Inventory.APTManual) != 0 {
 		t.Fatalf("minimal profile scanned disabled dependencies: %#v", message)
 	}
+}
+
+func TestOhMyPiToggleControlsMentatNavigationAndInventory(t *testing.T) {
+	profile := appconfig.ProfileFromPreset(appconfig.Presets[3], time.Now())
+	profile.Set(appconfig.Features, "agents", true)
+	profile.Set(appconfig.Agents, "omp", true)
+	if !anyAgentEnabled(profile) {
+		t.Fatal("selected Oh My Pi did not enable Mentat navigation")
+	}
+	selection := inventorySelection(profile)
+	if !selection.IDs["omp"] || selection.IDs["codex"] {
+		t.Fatalf("Oh My Pi toggle leaked another Mentat: %#v", selection.IDs)
+	}
+
+	profile.Set(appconfig.Agents, "omp", false)
+	if anyAgentEnabled(profile) {
+		t.Fatal("disabled Oh My Pi kept Mentat navigation enabled")
+	}
+}
+
+func TestEmbeddedEnvironmentDoesNotLeakOuterTerminalCapabilities(t *testing.T) {
+	for key, value := range map[string]string{
+		"ALACRITTY_WINDOW_ID":   "4",
+		"CMUX_SURFACE_ID":       "outer-cmux",
+		"GHOSTTY_RESOURCES_DIR": "/outer/ghostty",
+		"HERDR_ENV":             "1",
+		"ITERM_SESSION_ID":      "outer-iterm",
+		"TERM_FEATURES":         "Sy",
+		"TERM_PROGRAM":          "WezTerm",
+		"TERM_PROGRAM_VERSION":  "999",
+		"VSCODE_PID":            "12",
+		"WEZTERM_PANE":          "8",
+		"WT_SESSION":            "outer-windows-terminal",
+		"ZELLIJ_SESSION_NAME":   "outer-zellij",
+	} {
+		t.Setenv(key, value)
+	}
+	environment := environmentMap(childEnvironment())
+	for _, key := range []string{
+		"ALACRITTY_WINDOW_ID", "GHOSTTY_RESOURCES_DIR", "ITERM_SESSION_ID",
+		"TERM_FEATURES", "TERM_PROGRAM_VERSION", "VSCODE_PID", "WEZTERM_PANE", "CMUX_SURFACE_ID", "HERDR_ENV",
+		"WT_SESSION", "ZELLIJ_SESSION_NAME",
+	} {
+		if value, ok := environment[key]; ok {
+			t.Fatalf("embedded environment leaked %s=%q", key, value)
+		}
+	}
+	if environment["TERM"] != "xterm-256color" || environment["TERM_PROGRAM"] != "LisanAlGaib" {
+		t.Fatalf("embedded terminal identity is incomplete: %#v", environment)
+	}
+}
+
+func TestOhMyPiEnvironmentDisablesUnsupportedVirtualTerminalFeatures(t *testing.T) {
+	environment := environmentMap(agentEnvironment([]string{"PATH=/bin"}, "omp"))
+	for key, want := range map[string]string{
+		"PI_NO_DECCARA":          "1",
+		"PI_NO_SYNC_OUTPUT":      "1",
+		"PI_TUI_RESIZE_IN_PLACE": "0",
+	} {
+		if got := environment[key]; got != want {
+			t.Fatalf("Oh My Pi compatibility %s=%q, want %q", key, got, want)
+		}
+	}
+	if got := environmentMap(agentEnvironment([]string{"PATH=/bin"}, "codex")); len(got) != 1 || got["PATH"] != "/bin" {
+		t.Fatalf("Oh My Pi compatibility leaked to another Mentat: %#v", got)
+	}
+}
+
+func environmentMap(environment []string) map[string]string {
+	result := make(map[string]string, len(environment))
+	for _, item := range environment {
+		key, value, ok := strings.Cut(item, "=")
+		if ok {
+			result[key] = value
+		}
+	}
+	return result
 }
 
 func TestHostTerminalUsesDefaultShellFromEnvironment(t *testing.T) {
@@ -606,6 +684,40 @@ func TestPasteReachesCapturedTerminalAndMentatSessions(t *testing.T) {
 	}
 }
 
+func TestLargeMentatPasteDoesNotBlockTheUI(t *testing.T) {
+	model := NewModel(t.TempDir())
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := strings.Repeat("x", 256<<10)
+	id := agentSessionID("omp")
+	session, err := terminalhost.Start(terminalhost.Spec{
+		ID: id, Name: "Oh My Pi", Path: executable,
+		Args: []string{"-test.run=^TestTerminalChildProcess$"},
+		Dir:  model.root,
+		Env: terminalhost.Environment(os.Environ(),
+			"LISAN_TEST_TERMINAL_CHILD=1",
+			"LISAN_TEST_TERMINAL_PASTE_SIZE="+strconv.Itoa(len(content)),
+		),
+		Input: terminalhost.InputPolicy{WaitForBracketedPaste: true},
+	}, 60, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	model.sessions[id] = session
+	model.section, model.page, model.selectedAgent, model.capture = sectionAgents, pageAgent, "omp", true
+	waitForSessionText(t, session, "paste-ready")
+
+	started := time.Now()
+	model.Update(tea.PasteMsg{Content: content})
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("Bubble Tea update blocked for %s while queuing a large paste", elapsed)
+	}
+	waitForSessionText(t, session, "paste-ok")
+}
+
 func TestSplitTerminalRoutesPasteToFocusedPane(t *testing.T) {
 	model := NewModel(t.TempDir())
 	model.section, model.page = sectionTerminal, pageTerminal
@@ -711,6 +823,46 @@ func TestMentatSessionSupportsWrapperScrollback(t *testing.T) {
 	}
 }
 
+func TestNativeCopyModeSelectsCellsAndRestoresInput(t *testing.T) {
+	model := NewModel(t.TempDir())
+	id := agentSessionID("codex")
+	session, err := terminalhost.Start(terminalhost.Spec{
+		ID: id, Name: "Codex", Path: "/bin/sh",
+		Args: []string{"-c", "printf 'alpha beta'; sleep 5"},
+		Dir:  model.root,
+	}, 40, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	model.sessions[id] = session
+	model.section, model.page, model.selectedAgent, model.capture = sectionAgents, pageAgent, "codex", true
+	waitForSessionText(t, session, "alpha beta")
+
+	model.Update(tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModCtrl | tea.ModShift}))
+	if !model.copy.Active || model.capture {
+		t.Fatalf("copy mode state = %#v, capture=%v", model.copy, model.capture)
+	}
+	model.copy.Anchor = terminalhost.ViewportPoint{X: 0, Y: 0}
+	model.copy.Focus = terminalhost.ViewportPoint{X: 4, Y: 0}
+	model.copy.HasSelection = true
+	content, ok := model.embeddedContent(theme.All[model.themeIndex], 40, 6)
+	if !ok || !strings.Contains(content, "\x1b[7m") {
+		t.Fatalf("selected cells were not highlighted: %q", content)
+	}
+
+	command := model.handleCopyKey("enter")
+	if command == nil {
+		t.Fatal("copying a selection returned no clipboard command")
+	}
+	if got := fmt.Sprint(command()); got != "alpha" {
+		t.Fatalf("clipboard selection = %q, want alpha", got)
+	}
+	if model.copy.Active || !model.capture {
+		t.Fatalf("copy completion did not restore input: copy=%#v capture=%v", model.copy, model.capture)
+	}
+}
+
 func waitForSessionText(t *testing.T, session *terminalhost.Session, want string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
@@ -727,7 +879,16 @@ func TestTerminalChildProcess(t *testing.T) {
 	if os.Getenv("LISAN_TEST_TERMINAL_CHILD") != "1" {
 		return
 	}
-	if content := os.Getenv("LISAN_TEST_TERMINAL_PASTE"); content != "" {
+	content := os.Getenv("LISAN_TEST_TERMINAL_PASTE")
+	if rawSize := os.Getenv("LISAN_TEST_TERMINAL_PASTE_SIZE"); rawSize != "" {
+		size, err := strconv.Atoi(rawSize)
+		if err != nil || size <= 0 {
+			_, _ = fmt.Fprintf(os.Stdout, "paste-size-error:%q", rawSize)
+			os.Exit(1)
+		}
+		content = strings.Repeat("x", size)
+	}
+	if content != "" {
 		state, err := term.MakeRaw(os.Stdin.Fd())
 		if err != nil {
 			_, _ = fmt.Fprintf(os.Stdout, "paste-raw-error:%v", err)
@@ -813,6 +974,21 @@ func TestEmbeddedTerminalScreenUsesTheNaturalLeftEdge(t *testing.T) {
 	}
 	if width := lipgloss.Width(rendered); width != 4 {
 		t.Fatalf("terminal viewport width = %d, want 4", width)
+	}
+}
+
+func TestEmbeddedTerminalScreenBoundsWideAndCombiningGraphemes(t *testing.T) {
+	const width = 7
+	rendered := renderTerminalScreen(
+		"a😀界e\u0301\x1b]8;;https://example.invalid\x1b\\linked\x1b]8;;\x1b\\",
+		lipgloss.Color(nvimconfig.ChocolateBackground),
+		width,
+		2,
+	)
+	for index, line := range strings.Split(rendered, "\n") {
+		if got := lipgloss.Width(line); got != width {
+			t.Fatalf("Unicode terminal row %d has width %d, want %d: %q", index, got, width, line)
+		}
 	}
 }
 
@@ -1066,6 +1242,19 @@ func TestControlCQuitsOverviewBeforeStaleCapture(t *testing.T) {
 	}
 	if _, ok := cmd().(tea.QuitMsg); !ok {
 		t.Fatalf("Ctrl-C returned %T, want tea.QuitMsg", cmd())
+	}
+}
+
+func TestViewRequestsCapabilityNeutralInputEnhancements(t *testing.T) {
+	model := NewModel(t.TempDir())
+	view := model.View()
+	if !view.ReportFocus {
+		t.Fatal("view did not request host focus events")
+	}
+	if !view.KeyboardEnhancements.ReportAlternateKeys ||
+		!view.KeyboardEnhancements.ReportAllKeysAsEscapeCodes ||
+		!view.KeyboardEnhancements.ReportAssociatedText {
+		t.Fatalf("view did not request complete semantic key data: %#v", view.KeyboardEnhancements)
 	}
 }
 

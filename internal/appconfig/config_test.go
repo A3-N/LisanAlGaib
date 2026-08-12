@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -101,6 +102,19 @@ func TestEveryPresetOnlyUsesKnownOptions(t *testing.T) {
 	}
 }
 
+func TestAgentCatalogIncludesOhMyPi(t *testing.T) {
+	want := []string{"codex", "opencode", "claude", "kimi", "omp"}
+	if got := AgentIDs(); !slices.Equal(got, want) {
+		t.Fatalf("agent catalog = %#v, want %#v", got, want)
+	}
+	for _, presetIndex := range []int{0, 2} {
+		profile := ProfileFromPreset(Presets[presetIndex], time.Now())
+		if !profile.Agent("omp") {
+			t.Fatalf("agent preset %q does not select Oh My Pi", Presets[presetIndex].ID)
+		}
+	}
+}
+
 func TestEveryPresetExcludesRemovedHostOptions(t *testing.T) {
 	for _, preset := range Presets {
 		profile := ProfileFromPreset(preset, time.Now())
@@ -151,8 +165,8 @@ func TestLegacyTerminalChoicesLoadButAreNotSaved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacy := strings.Replace(string(data), `"docker_shell": "fish",`, `"outer": "kitty", "host_shell": "auto", "docker_shell": "fish",`, 1)
-	legacy = strings.Replace(legacy, `"git": true,`, `"fish": true, "kitty": true, "nerd-font": true, "bwrap": true, "docker": true, "git": true,`, 1)
+	legacy := strings.Replace(string(data), `"docker_shell": "fish",`, `"outer": "deprecated", "host_shell": "auto", "docker_shell": "fish",`, 1)
+	legacy = strings.Replace(legacy, `"git": true,`, `"retired-emulator": true, "retired-shell": true, "git": true,`, 1)
 	if legacy == string(data) {
 		t.Fatal("could not create legacy terminal fixture")
 	}
@@ -170,7 +184,7 @@ func TestLegacyTerminalChoicesLoadButAreNotSaved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), `"outer"`) || strings.Contains(string(data), `"host_shell"`) || strings.Contains(string(data), `"kitty": true`) || strings.Contains(string(data), `"fish": true`) || strings.Contains(string(data), `"nerd-font": true`) || strings.Contains(string(data), `"bwrap": true`) || strings.Contains(string(data), `"docker": true`) {
+	if strings.Contains(string(data), `"outer"`) || strings.Contains(string(data), `"host_shell"`) || strings.Contains(string(data), `"retired-emulator": true`) || strings.Contains(string(data), `"retired-shell": true`) {
 		t.Fatalf("removed terminal settings survived save: %s", data)
 	}
 }

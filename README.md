@@ -117,7 +117,8 @@ _After running the `docker/vm_` argument, the tool will make use of your termina
 ---
 ## Config
 
-- Codex, OpenCode, Claude, and Kimi agent CLIs
+- Codex, OpenCode, Claude, Kimi, and Oh My Pi agent CLIs
+- Ubuntu's `bubblewrap` sandbox helper when the Codex Docker profile is selected
 - Common language runtimes, package managers, network diagnostics, and workspace utilities
 - Fish, Bash, Zsh, or POSIX `sh` inside Docker
 - Manifest-driven extensions, disabled by default
@@ -165,6 +166,6 @@ normal filesystem path to the rest of the host. Docker escape vulnerabilities, n
 Changing tabs does not restart shells, agents, the editor, or extension sessions. Shells and agents may keep working in the background; on Unix the hidden editor is paused to avoid idle redraw work. Closing the last Docker cockpit stops Lisan's containers, while their container state and named volumes remain ready for the next launch. Background processes do not survive that
 stop. `cleanup` is the destructive reset.
 
-Host terminal paste shortcuts work in an active Mentat, editor, or terminal pane. Lisan forwards each paste as a single bracketed-paste operation, so multiline text keeps the semantics expected by shells and full-screen apps. Press `Ctrl-G` or click the pane to activate input first. Because Lisan enables mouse interaction, use your terminal's selection override (often `Shift` while dragging) when selecting text to copy. Mentats and terminal panes each retain their own wrapper scroll position; use the wheel, `PgUp`/`PgDn`, or `Home`/`End` to move through their output history while wrapper controls are active.
+Host terminal paste shortcuts work in an active Mentat, editor, or terminal pane. Lisan preserves each paste as one ordered operation and adds bracketed-paste markers when the child requests them; Mentats wait briefly for that startup negotiation so an early multiline paste is not mistaken for several submissions. Large pastes use bounded asynchronous delivery, keeping the cockpit responsive under PTY backpressure. Press `Ctrl-G` or click the pane to activate input first. `Ctrl-Shift-V` requests the current terminal clipboard when that operation is supported. `Ctrl-Shift-C`, or `c` in wrapper mode, enters native copy mode; select cells with the mouse or keyboard and press `Enter` or `Y` to copy. Mentats and terminal panes each retain their own wrapper scroll position; use the wheel, `PgUp`/`PgDn`, or `Home`/`End` to move through their output history while wrapper controls are active. Modified navigation and editing keys, including `Ctrl-Left`, `Ctrl-Right`, and `Ctrl-Backspace`, are translated into broadly compatible child-terminal input sequences.
 
 The Terminal toolbar can create multiple persistent in-app terminal tabs, split the active pane vertically (left/right) or horizontally (top/bottom), and close the active pane. Clicking a pane focuses it, so keyboard input, paste, mouse events, the cursor, resizing, and scrollback all target that pane. These are panes inside Lisan; it never opens or replaces a host OS terminal window.

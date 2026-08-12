@@ -175,6 +175,20 @@ var Options = []Option{
 	{Agents, "opencode", "OpenCode", "Provider-flexible coding agent CLI"},
 	{Agents, "claude", "Claude Code", "Anthropic coding agent CLI"},
 	{Agents, "kimi", "Kimi Code", "Moonshot coding agent CLI"},
+	{Agents, "omp", "Oh My Pi", "Coding-first, provider-flexible agent CLI"},
+}
+
+// AgentIDs returns the selectable Mentat IDs in their configured display
+// order. Runtime, installer, and UI code use this catalog so adding an agent
+// does not require maintaining parallel identity lists.
+func AgentIDs() []string {
+	var ids []string
+	for _, option := range Options {
+		if option.Category == Agents {
+			ids = append(ids, option.ID)
+		}
+	}
+	return ids
 }
 
 type Profile struct {
@@ -195,6 +209,7 @@ type TerminalConfig struct {
 	DockerShell   string `json:"docker_shell"`
 	DockerUser    string `json:"docker_user"`
 	DockerWorkdir string `json:"docker_workdir"`
+	legacyRuntime bool
 }
 
 // UnmarshalJSON accepts the removed outer and host-shell settings so profiles
@@ -219,6 +234,7 @@ func (config *TerminalConfig) UnmarshalJSON(data []byte) error {
 		DockerShell:   wire.DockerShell,
 		DockerUser:    wire.DockerUser,
 		DockerWorkdir: wire.DockerWorkdir,
+		legacyRuntime: wire.Outer != "" || wire.HostShell != "",
 	}
 	return nil
 }
@@ -296,12 +312,12 @@ var Presets = []Preset{
 		"files", "tools", "agents", "terminal",
 		"git", "rg", "nvim", "nvchad", "python", "pip", "curl", "zip",
 		"ip", "ping", "dns", "net-tools", "traceroute", "netcat",
-		"codex", "opencode", "claude", "kimi"),
+		"codex", "opencode", "claude", "kimi", "omp"),
 	preset("core", "Mentat", "Core editor with NvChad, Git, search, and inventory",
 		"files", "tools", "git", "rg", "nvim", "nvchad"),
 	preset("agent-lab", "Landsraad", "Editor, terminal, and every coding-agent wrapper",
 		"files", "agents", "terminal", "git", "rg", "nvim", "nvchad", "node",
-		"codex", "opencode", "claude", "kimi"),
+		"codex", "opencode", "claude", "kimi", "omp"),
 	preset("minimal", "Muad'Dib", "Minimal overview only; no child process is launched"),
 }
 
@@ -634,13 +650,17 @@ func normalizeProfile(profile *Profile) {
 	if profile.Tools == nil {
 		profile.Tools = map[string]bool{}
 	}
-	// Shells and terminal emulators are runtime context now, not configurable
-	// tool toggles. Drop legacy selections before strict option validation.
-	delete(profile.Tools, "fish")
-	delete(profile.Tools, "kitty")
-	delete(profile.Tools, "nerd-font")
-	delete(profile.Tools, "bwrap")
-	delete(profile.Tools, "docker")
+	// Shell and outer-terminal choices are runtime context now, not tool
+	// toggles. Profiles carrying the retired terminal settings may also carry
+	// retired runtime tool keys; discard only their unknown tool entries before
+	// strict validation. Current profiles still reject unknown options.
+	if profile.Terminal.legacyRuntime {
+		for id := range profile.Tools {
+			if !knownOption(Tools, id) {
+				delete(profile.Tools, id)
+			}
+		}
+	}
 	if profile.Agents == nil {
 		profile.Agents = map[string]bool{}
 	}

@@ -40,6 +40,10 @@ func (m *Model) View() tea.View {
 	view := tea.NewView(content)
 	view.AltScreen = true
 	view.MouseMode = tea.MouseModeCellMotion
+	view.ReportFocus = true
+	view.KeyboardEnhancements.ReportAlternateKeys = true
+	view.KeyboardEnhancements.ReportAllKeysAsEscapeCodes = true
+	view.KeyboardEnhancements.ReportAssociatedText = true
 	view.WindowTitle = "LisanAlGaib"
 	view.BackgroundColor = m.frameBackground(currentTheme)
 	view.ForegroundColor = lipgloss.Color(currentTheme.Text)
@@ -55,6 +59,10 @@ func (m *Model) compactView(currentTheme theme.Theme) tea.View {
 		Render(trimRunes(" Resize terminal", wrapSafeWidth))
 	view := tea.NewView(content)
 	view.AltScreen = true
+	view.ReportFocus = true
+	view.KeyboardEnhancements.ReportAlternateKeys = true
+	view.KeyboardEnhancements.ReportAllKeysAsEscapeCodes = true
+	view.KeyboardEnhancements.ReportAssociatedText = true
 	view.WindowTitle = "LisanAlGaib"
 	view.BackgroundColor = m.frameBackground(currentTheme)
 	view.ForegroundColor = lipgloss.Color(currentTheme.Text)
@@ -639,7 +647,7 @@ func (m *Model) extensionActionDocument(state connectorapi.State) []extensionLin
 	for index, input := range action.Inputs {
 		value := m.connectorInputValue(state.Config.ID, action.ID, input.ID)
 		if m.extensionInputEdit == action.ID+":"+input.ID {
-			value = m.extensionInputText + "▌"
+			value = lineWithCursor(m.extensionInputText, m.extensionInputCursor)
 		}
 		label, display := connectorInputAffordance(input, value)
 		kind, name := splitInputAffordance(label)
@@ -753,11 +761,11 @@ func (m *Model) extensionSessionDocument(id string) []extensionLine {
 	if prompt == "" {
 		prompt = "> "
 	}
-	cursor := ""
+	input := m.extensionSessionInput
 	if m.extensionSessionCapture {
-		cursor = "▌"
+		input = lineWithCursor(input, m.extensionSessionCursor)
 	}
-	lines = append(lines, extensionTextLines("", "  "+prompt+m.extensionSessionInput+cursor, "", "  Enter sends a line · Ctrl-G returns to wrapper controls")...)
+	lines = append(lines, extensionTextLines("", "  "+prompt+input, "", "  Enter sends a line · Ctrl-G returns to wrapper controls")...)
 	return lines
 }
 
@@ -797,12 +805,14 @@ func (m *Model) helpLines() []string {
 		"  Mouse        click navigation, sidebar items, main controls, or embedded panes",
 		"  Overview     click again to reveal or hide the Tools pane",
 		"  Terminal bar New tab · Vert left/right · Hor top/bottom · Close active pane",
-		"  Paste        host terminal paste shortcut targets the active embedded pane",
-		"  Copy         use the host terminal's selection override (often Shift+drag)",
+		"  Terminal keys Ctrl-Shift-T new tab · Ctrl-Shift-W close · Ctrl-PgUp/PgDn tabs",
+		"  Paste        host paste, or Ctrl-Shift-V when clipboard reads are supported",
+		"  Copy         Ctrl-Shift-C, or c in wrapper mode; drag/arrows then Enter/Y",
 		"  Re-click     collapse/restore the active sidebar; Extensions toggles its menu",
 		"  Wheel        scroll embedded history, extensions, or the sidebar",
 		"  Tab/S-Tab    next/previous top-level page (wrapper mode)",
 		"  Ctrl-G       toggle input between embedded app and wrapper",
+		"  Ctrl-Shift-G send a literal Ctrl-G to the embedded app",
 		"  Ctrl-B       collapse/expand sidebar",
 		"  h / l        focus sidebar / main pane",
 		"  j / k        move, select an extension control, or vertically scroll",
