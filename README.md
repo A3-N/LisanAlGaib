@@ -1,4 +1,5 @@
-# LisanAlGaib
+# Lisan 
+> Al-Gaib
 
 **Full-permission vibe coding without handing your host to the vibes. A  place for `/permissions` to be abused.**
 
