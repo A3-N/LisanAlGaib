@@ -9,6 +9,12 @@
 /extensions/*/bin/
 /shared/*
 !/shared/.gitkeep
+
+# Per-agent workspace configuration is copied into Docker locally but must not
+# be committed. Keep only Lisan's non-secret instruction templates tracked.
+/docker/home/agents/*/**
+!/docker/home/agents/*/AGENTS.md
+!/docker/home/agents/claude/CLAUDE.md
 *.test
 *.exe
 *.prof

@@ -178,10 +178,6 @@ func (s *Session) Title() string {
 	return s.title
 }
 
-func (s *Session) BackgroundColor() color.Color {
-	return s.background
-}
-
 func (s *Session) Cursor() Cursor {
 	position := s.emulator.CursorPosition()
 	s.mu.RLock()

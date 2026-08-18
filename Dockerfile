@@ -178,9 +178,10 @@ ENV SHELL=${LISAN_SHELL_PATH} \
 COPY --from=heighliner /out/lisan /usr/local/bin/lisan
 COPY --from=mentat_payloads /opt/lisan-agents /opt/lisan-agents
 COPY docker/lisan-entrypoint /usr/local/bin/lisan-entrypoint
+COPY docker/lisan-seed-agent-assets /usr/local/bin/lisan-seed-agent-assets
 COPY docker/nvim /usr/local/share/lisan/nvim
 COPY docker/home /usr/local/share/lisan/home
-RUN chmod 0755 /usr/local/bin/lisan /usr/local/bin/lisan-entrypoint; \
+RUN chmod 0755 /usr/local/bin/lisan /usr/local/bin/lisan-entrypoint /usr/local/bin/lisan-seed-agent-assets; \
     cp -a /usr/local/share/lisan/home/. /home/fremen/; \
     if [ "$LISAN_INSTALL_NVCHAD" = 1 ]; then \
       mkdir -p /home/fremen/.config/nvim; \

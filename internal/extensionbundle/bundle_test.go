@@ -9,7 +9,7 @@ import (
 	"lisanalgaib/internal/appconfig"
 )
 
-func TestBundledExtensionIsDiscoveredWithoutCoreRegistration(t *testing.T) {
+func TestRepositoryShipsWithoutBundledExtensions(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
@@ -18,12 +18,8 @@ func TestBundledExtensionIsDiscoveredWithoutCoreRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(bundles) != 1 || bundles[0].ID != "pardot-observatory" {
+	if len(bundles) != 0 {
 		t.Fatalf("unexpected discovered bundles: %#v", bundles)
-	}
-	connector := bundles[0].ConnectorConfig()
-	if connector.Enabled || connector.NativeExecutable == "" || connector.Network != appconfig.ExtensionControlNetworkName(connector.ID) {
-		t.Fatalf("discovered extension lifecycle is incomplete or enabled: %#v", connector)
 	}
 }
 

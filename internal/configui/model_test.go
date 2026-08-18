@@ -47,6 +47,28 @@ func TestPresetToggleAndSave(t *testing.T) {
 	}
 }
 
+func TestOverviewPageCanBeDisabled(t *testing.T) {
+	model := New(appconfig.DefaultDocument(time.Now()), filepath.Join(t.TempDir(), "config.json"))
+	model.expanded["features"] = true
+	if !model.working.Feature("overview") {
+		t.Fatal("default profile must include Overview")
+	}
+	for index, candidate := range model.rows() {
+		if candidate.kind != rowOption {
+			continue
+		}
+		option := appconfig.Options[candidate.option]
+		if option.Category == appconfig.Features && option.ID == "overview" {
+			model.activate(index)
+			if model.working.Feature("overview") {
+				t.Fatal("Overview checkbox did not turn off")
+			}
+			return
+		}
+	}
+	t.Fatal("config UI did not expose the Overview feature")
+}
+
 func TestDropdownDefaultsAndOrdering(t *testing.T) {
 	model := New(appconfig.DefaultDocument(time.Now()), filepath.Join(t.TempDir(), "config.json"))
 	for _, id := range dropdowns {

@@ -3,6 +3,7 @@ package launcher
 import (
 	"context"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,22 +11,50 @@ import (
 
 	"lisanalgaib/internal/appconfig"
 	"lisanalgaib/internal/connectors"
-	"lisanalgaib/internal/extensionbundle"
 )
 
-func TestNativeExtensionsUsePackedOrSourceExecutablesAndStop(t *testing.T) {
-	root, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
+func TestNativeExtensionsUseSourceExecutablesAndStop(t *testing.T) {
+	root := t.TempDir()
+	sourceDirectory := filepath.Join(root, "extensions", "test-extension", "cmd", "test-extension")
+	if err := os.MkdirAll(sourceDirectory, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	bundles, err := extensionbundle.Discover(root)
-	if err != nil || len(bundles) == 0 {
-		t.Fatalf("discover extension bundles: %v %#v", err, bundles)
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module nativefixture\n\ngo 1.26\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
+	const source = `package main
+
+import (
+	"encoding/json"
+	"flag"
+	"net/http"
+)
+
+func main() {
+	listen := flag.String("listen", "127.0.0.1:0", "listen address")
+	flag.Parse()
+	http.HandleFunc("/v3/manifest", func(writer http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(writer).Encode(map[string]any{
+			"protocol_version": 3, "id": "test-extension", "name": "Test Extension", "version": "3.0.0",
+			"views": []map[string]any{{"id": "status", "title": "Status", "default": true}},
+		})
+	})
+	_ = http.ListenAndServe(*listen, nil)
+}
+`
+	if err := os.WriteFile(filepath.Join(sourceDirectory, "main.go"), []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
 	profile := appconfig.ProfileFromPreset(appconfig.Presets[0], time.Now())
 	profile.ID = "native-test"
-	connector := bundles[0].ConnectorConfig()
-	connector.Enabled = true
+	connector := appconfig.ConnectorConfig{
+		ID: "test-extension", Name: "Test Extension", Enabled: true, Managed: true,
+		Bundle: "extensions/test-extension", Version: "3.0.0", Image: "fixture:3", BuildContext: ".",
+		Dockerfile: "extensions/test-extension/Dockerfile", NativeExecutable: "extensions/test-extension/bin/missing",
+		NativePackage: "extensions/test-extension/cmd/test-extension", Container: "lisan-test-extension",
+		User: "10001:10001", Network: appconfig.ExtensionControlNetworkName("test-extension"), Endpoint: "http://lisan-test-extension:7777",
+	}
 	profile.Connectors = []appconfig.ConnectorConfig{connector}
 	originalEndpoint := connector.Endpoint
 	ctx, cancel := context.WithCancel(context.Background())
@@ -44,37 +73,6 @@ func TestNativeExtensionsUsePackedOrSourceExecutablesAndStop(t *testing.T) {
 	manifest, err := connectors.FetchManifest(context.Background(), endpoint)
 	if err != nil || manifest.ID != connector.ID {
 		t.Fatalf("native extension was not reachable: manifest=%#v err=%v", manifest, err)
-	}
-	job, err := connectors.StartJob(context.Background(), endpoint, connectors.StartJobRequest{ActionID: "record-note", Inputs: map[string]string{"note": "native protocol test"}})
-	if err != nil || job.Status != connectors.JobSucceeded {
-		t.Fatalf("native v3 action failed: job=%#v err=%v", job, err)
-	}
-	job, err = connectors.StartJob(context.Background(), endpoint, connectors.StartJobRequest{ActionID: "survey", Inputs: map[string]string{"subject": "runtime boundary", "samples": "3", "detail": "field", "environment": "true"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for !job.Terminal() && time.Now().Before(deadline) {
-		time.Sleep(50 * time.Millisecond)
-		job, err = connectors.FetchJob(context.Background(), endpoint, job.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	if job.Status != connectors.JobSucceeded || len(job.Artifacts) != 1 {
-		t.Fatalf("showcase survey did not finish with an artifact: %#v", job)
-	}
-	artifact, err := connectors.FetchArtifact(context.Background(), endpoint, job.ID, job.Artifacts[0])
-	if err != nil || !strings.Contains(string(artifact), "runtime boundary") {
-		t.Fatalf("showcase artifact was not usable: %q %v", artifact, err)
-	}
-	session, err := connectors.OpenSession(context.Background(), endpoint, connectors.OpenSessionRequest{SessionID: "field-console", Rows: 20, Columns: 80})
-	if err != nil {
-		t.Fatal(err)
-	}
-	session, err = connectors.SendSessionInput(context.Background(), endpoint, session.ID, "help\n")
-	if err != nil || !strings.Contains(session.Output, "commands: help") {
-		t.Fatalf("restricted field console was not usable: %#v %v", session, err)
 	}
 
 	cancel()

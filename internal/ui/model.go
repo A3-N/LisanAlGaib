@@ -10,6 +10,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	uv "github.com/charmbracelet/ultraviolet"
 
 	"lisanalgaib/internal/appconfig"
@@ -37,6 +38,7 @@ const (
 	sectionAgents
 	sectionTerminal
 	sectionExtensions
+	sectionDisabled
 )
 
 type page int
@@ -49,6 +51,7 @@ const (
 	pageTerminal
 	pageConnector
 	pageHelp
+	pageDisabled
 )
 
 type rowKind int
@@ -314,17 +317,19 @@ func NewModelWithProfile(root string, profile appconfig.Profile) *Model {
 	saved := settings.Load()
 	_, themeIndex := theme.ByName(saved.Theme)
 	ctx, cancel := context.WithCancel(context.Background())
+	navigation := navigationFor(profile)
+	initialSection, initialPage := initialView(navigation)
 	return &Model{
 		ctx:          ctx,
 		cancel:       cancel,
 		root:         root,
 		profile:      profile.Clone(),
-		navigation:   navigationFor(profile),
+		navigation:   navigation,
 		width:        120,
 		height:       36,
-		section:      sectionOverview,
-		page:         pageOverview,
-		previousPage: pageOverview,
+		section:      initialSection,
+		page:         initialPage,
+		previousPage: initialPage,
 		sidebar:      false,
 		focusSidebar: false,
 		themeIndex:   themeIndex,
@@ -366,10 +371,12 @@ func refreshCmd(parent context.Context, profile appconfig.Profile) tea.Cmd {
 }
 
 func navigationFor(profile appconfig.Profile) []navItem {
-	items := []navItem{{sectionOverview, "󰋜", "Overview"}}
-	for _, item := range navigation[1:] {
+	var items []navItem
+	for _, item := range navigation {
 		enabled := false
 		switch item.Section {
+		case sectionOverview:
+			enabled = profile.Feature("overview")
 		case sectionExplorer:
 			enabled = profile.Feature("files")
 		case sectionAgents:
@@ -388,6 +395,27 @@ func navigationFor(profile appconfig.Profile) []navItem {
 		}
 	}
 	return items
+}
+
+func initialView(items []navItem) (section, page) {
+	if len(items) == 0 {
+		return sectionDisabled, pageDisabled
+	}
+	selected := items[0].Section
+	switch selected {
+	case sectionOverview:
+		return selected, pageOverview
+	case sectionExplorer:
+		return selected, pageFile
+	case sectionAgents:
+		return selected, pageAgent
+	case sectionTerminal:
+		return selected, pageTerminal
+	case sectionExtensions:
+		return selected, pageConnector
+	default:
+		return sectionDisabled, pageDisabled
+	}
 }
 
 func firstEnabledConnector(profile appconfig.Profile) string {
@@ -475,6 +503,12 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.selectedAgent = m.firstAgentID()
 			}
 			return m, m.ensureAgent(m.selectedAgent)
+		}
+		if m.section == sectionExplorer {
+			return m, m.ensureEditor("")
+		}
+		if m.section == sectionTerminal {
+			return m, m.ensureShell()
 		}
 		if m.section == sectionExtensions {
 			m.ensureSelectedExtensionItems()
@@ -568,6 +602,15 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.handleCopyMouse(msg)
 		}
 		if msg.Button == tea.MouseLeft {
+			if msg.Mod.Contains(tea.ModShift) {
+				if session, _ := m.visibleSession(); session != nil {
+					m.enterCopyMode()
+					if _, ok := m.copyViewportPoint(msg.Mouse()); ok {
+						return m, m.handleCopyMouse(msg)
+					}
+					m.leaveCopyMode(true)
+				}
+			}
 			return m, m.handleClick(msg)
 		}
 		return m, m.forwardMouse(msg)
@@ -747,7 +790,10 @@ func (m *Model) handleKey(key string) tea.Cmd {
 			m.page = m.previousPage
 			m.resumeVisibleSession()
 		} else {
-			return m.selectSection(sectionOverview)
+			if len(m.navigation) > 0 {
+				return m.selectSection(m.navigation[0].Section)
+			}
+			m.status = "No pages are enabled; run lisan config to add one"
 		}
 		return nil
 	case "r":
@@ -1217,7 +1263,7 @@ func (m *Model) ensureSelectedExtensionItems() {
 
 func defaultSectionView(value section) sectionViewState {
 	switch value {
-	case sectionOverview, sectionExplorer, sectionTerminal:
+	case sectionOverview, sectionExplorer, sectionTerminal, sectionDisabled:
 		return sectionViewState{}
 	default:
 		return sectionViewState{Sidebar: true, FocusSidebar: true}
@@ -1288,7 +1334,7 @@ func (m *Model) restoreExtensionView(id string) {
 
 func (m *Model) blurVisibleSession() {
 	if m.copy.Active {
-		m.copy = terminalCopyState{}
+		m.leaveCopyMode(false)
 	}
 	if session, id := m.visibleSession(); session != nil {
 		session.Blur()
@@ -1313,10 +1359,14 @@ func (m *Model) resumeVisibleSession() {
 }
 
 func (m *Model) sectionSupportsSidebar() bool {
-	return m.section != sectionOverview && m.section != sectionExplorer && m.section != sectionTerminal
+	return m.section != sectionOverview && m.section != sectionExplorer && m.section != sectionTerminal && m.section != sectionDisabled
 }
 
 func (m *Model) cycleSection(delta int) tea.Cmd {
+	if len(m.navigation) == 0 {
+		m.status = "No pages are enabled; run lisan config to add one"
+		return nil
+	}
 	current := 0
 	for index, item := range m.navigation {
 		if item.Section == m.section {
@@ -1334,6 +1384,15 @@ func (m *Model) cycleTheme(delta int) {
 	m.status = "Theme changed to " + current.Name
 	if err := settings.Save(settings.Settings{Theme: current.Name}); err != nil {
 		m.status += " (could not save: " + err.Error() + ")"
+	}
+	if session := m.sessions[editorSessionID]; session != nil && session.Name() == "NvChad" {
+		pairedTheme := current.NeovimTheme()
+		session.SetBackgroundColor(lipgloss.Color(pairedTheme.Background))
+		if exited, _ := session.Exited(); !exited {
+			if err := session.SendText(vimThemeCommand(pairedTheme.Name)); err != nil {
+				m.status += " (NvChad theme unavailable: " + err.Error() + ")"
+			}
+		}
 	}
 }
 

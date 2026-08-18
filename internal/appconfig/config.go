@@ -134,6 +134,7 @@ type Option struct {
 }
 
 var Options = []Option{
+	{Features, "overview", "Overview page", "Landing page and optional tool inventory pane"},
 	{Features, "files", "Files + NvChad", "Embedded editor and workspace picker"},
 	{Features, "tools", "Tool inventory", "Dynamic configured-tool and package inventory"},
 	{Features, "agents", "Mentats", "Coding-agent pages; individual mentats are selected below"},
@@ -309,16 +310,16 @@ type Preset struct {
 
 var Presets = []Preset{
 	preset("full", "Golden Path", "Every page and agent with a lean Python and network toolset",
-		"files", "tools", "agents", "terminal",
+		"overview", "files", "tools", "agents", "terminal",
 		"git", "rg", "nvim", "nvchad", "python", "pip", "curl", "zip",
 		"ip", "ping", "dns", "net-tools", "traceroute", "netcat",
 		"codex", "opencode", "claude", "kimi", "omp"),
 	preset("core", "Mentat", "Core editor with NvChad, Git, search, and inventory",
-		"files", "tools", "git", "rg", "nvim", "nvchad"),
+		"overview", "files", "tools", "git", "rg", "nvim", "nvchad"),
 	preset("agent-lab", "Landsraad", "Editor, terminal, and every coding-agent wrapper",
-		"files", "agents", "terminal", "git", "rg", "nvim", "nvchad", "node",
+		"overview", "files", "agents", "terminal", "git", "rg", "nvim", "nvchad", "node",
 		"codex", "opencode", "claude", "kimi", "omp"),
-	preset("minimal", "Muad'Dib", "Minimal overview only; no child process is launched"),
+	preset("minimal", "Muad'Dib", "Minimal overview only; no child process is launched", "overview"),
 }
 
 func preset(id, name, description string, enabled ...string) Preset {
@@ -351,8 +352,8 @@ func ConfigPath() (string, error) {
 
 func DefaultDocument(now time.Time) Document {
 	profile := ProfileFromPreset(Presets[0], now)
-	// New installations expose bundled extensions in config but never start
-	// them implicitly. Extensions remain a separate opt-in from every preset.
+	// Discovered extensions may be reconciled into this profile later, but they
+	// remain a separate opt-in from every preset.
 	for index := range profile.Connectors {
 		profile.Connectors[index].Enabled = false
 	}
@@ -643,6 +644,11 @@ func normalizeProfile(profile *Profile) {
 	}
 	if profile.Features == nil {
 		profile.Features = map[string]bool{}
+	}
+	// Overview predates feature toggles. Preserve it for profiles saved before
+	// the option existed while respecting an explicit false value thereafter.
+	if _, configured := profile.Features["overview"]; !configured {
+		profile.Features["overview"] = true
 	}
 	// Skills are discovered and managed by each agent. Drop the removed wrapper
 	// index toggle so profiles from earlier releases continue to load.

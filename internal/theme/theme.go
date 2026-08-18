@@ -18,6 +18,28 @@ type Theme struct {
 	Selection  string
 }
 
+// NeovimTheme describes the NvChad palette paired with a Lisan theme.
+type NeovimTheme struct {
+	Name       string
+	Background string
+}
+
+var neovimThemes = map[string]NeovimTheme{
+	"Arrakis":       {Name: "chocolate", Background: "#252221"},
+	"Giedi Prime":   {Name: "bearded-arc", Background: "#1C2433"},
+	"Bene Gesserit": {Name: "catppuccin", Background: "#1E1D2D"},
+	"Caladan":       {Name: "blossom_light", Background: "#E6DFDC"},
+	"Ix":            {Name: "hiberbee", Background: "#121110"},
+}
+
+// NeovimTheme returns the NvChad pairing, falling back to Arrakis/chocolate.
+func (t Theme) NeovimTheme() NeovimTheme {
+	if paired, ok := neovimThemes[t.Name]; ok {
+		return paired
+	}
+	return neovimThemes["Arrakis"]
+}
+
 var All = []Theme{
 	{
 		Name:       "Arrakis",

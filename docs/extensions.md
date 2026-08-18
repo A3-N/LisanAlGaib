@@ -6,10 +6,9 @@ Lisan discovers a small lifecycle bundle, talks protocol v3 over HTTP, and
 renders semantic data. It never imports extension code or switches on an
 extension ID.
 
-Use [`extensions/pardot-observatory`](../extensions/pardot-observatory) as the
-working reference. It is disabled by default and demonstrates structured
-views, every input type, asynchronous jobs, cancellation, logs, checksummed
-artifacts, optional state/shared grants, and an extension-owned console.
+The repository ships without a bundled example extension. Add a directory
+under `extensions/` when developing one locally; discovery requires no core
+registration.
 
 ## Directory contract
 
@@ -158,8 +157,7 @@ An extension session may feel like a shell, but the extension must define its
 boundary. A mobile extension could accept `devices`, `install`, and `logs`, then
 map those commands to fixed `adb` argument arrays inside its own process or
 container. Do not expose an arbitrary shell merely because the transport can
-carry text. Pardot Observatory's field console is the reference restricted
-REPL.
+carry text; implement a restricted command vocabulary instead.
 
 ## When the core should change
 

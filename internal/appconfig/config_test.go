@@ -139,6 +139,28 @@ func TestLegacySkillsFeatureIsRemovedDuringNormalization(t *testing.T) {
 	}
 }
 
+func TestOverviewFeatureMigratesEnabledAndCanBeDisabled(t *testing.T) {
+	legacy := ProfileFromPreset(Presets[0], time.Now())
+	legacy.ID = "legacy-overview"
+	delete(legacy.Features, "overview")
+	normalized, err := NormalizeProfile(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !normalized.Feature("overview") {
+		t.Fatal("profile saved before the Overview toggle lost its landing page")
+	}
+
+	normalized.Set(Features, "overview", false)
+	disabled, err := NormalizeProfile(normalized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if disabled.Feature("overview") {
+		t.Fatal("explicitly disabled Overview feature was re-enabled")
+	}
+}
+
 func TestDockerShellChoicesAreValidated(t *testing.T) {
 	for _, shell := range []string{"fish", "bash", "zsh", "sh"} {
 		profile := ProfileFromPreset(Presets[0], time.Now())

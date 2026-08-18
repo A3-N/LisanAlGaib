@@ -26,6 +26,7 @@ import (
 )
 
 func TestMouseTopBarAndTheme(t *testing.T) {
+	t.Setenv(appconfig.EnvironmentConfig, filepath.Join(t.TempDir(), "config.json"))
 	model := NewModel(t.TempDir())
 	model.inventory = inventory.Snapshot{Tools: []inventory.Tool{{ID: "codex", Name: "Codex", Category: "Agent CLIs", Agent: true, Installed: true}}}
 	model.loading = false
@@ -116,6 +117,37 @@ func TestMinimalProfileOnlyLoadsOverview(t *testing.T) {
 	message := model.Init()().(refreshMsg)
 	if len(message.Inventory.Tools) != 0 || len(message.Inventory.APTManual) != 0 {
 		t.Fatalf("minimal profile scanned disabled dependencies: %#v", message)
+	}
+}
+
+func TestOverviewCanBeRemovedFromNavigation(t *testing.T) {
+	profile := appconfig.ProfileFromPreset(appconfig.Presets[0], time.Now())
+	profile.Set(appconfig.Features, "overview", false)
+	model := NewModelWithProfile(t.TempDir(), profile)
+	if len(model.navigation) == 0 || model.navigation[0].Section != sectionExplorer {
+		t.Fatalf("Overview-disabled navigation did not start with Files: %#v", model.navigation)
+	}
+	if model.section != sectionExplorer || model.page != pageFile || model.sectionName() == "Overview" {
+		t.Fatalf("Overview remained the initial page: section=%v page=%v name=%q", model.section, model.page, model.sectionName())
+	}
+	model.handleKey("esc")
+	if model.section == sectionOverview || model.page == pageOverview {
+		t.Fatal("Esc reopened a disabled Overview page")
+	}
+}
+
+func TestAllPagesCanBeDisabledSafely(t *testing.T) {
+	profile := appconfig.ProfileFromPreset(appconfig.Presets[3], time.Now())
+	profile.Set(appconfig.Features, "overview", false)
+	model := NewModelWithProfile(t.TempDir(), profile)
+	if len(model.navigation) != 0 || model.section != sectionDisabled || model.page != pageDisabled {
+		t.Fatalf("empty page selection was not represented safely: nav=%#v section=%v page=%v", model.navigation, model.section, model.page)
+	}
+	if command := model.cycleSection(1); command != nil {
+		t.Fatal("empty page cycle returned a command")
+	}
+	if content := model.View().Content; !strings.Contains(content, "No pages are enabled") {
+		t.Fatalf("empty page guidance was not rendered: %q", content)
 	}
 }
 
@@ -349,7 +381,7 @@ func TestExtensionsUseOneStickyMenuAndProtocolV3Surfaces(t *testing.T) {
 		if item.Name == "Extensions" && item.Section == sectionExtensions {
 			extensionTabs++
 		}
-		if item.Name == "Pardot Observatory" || item.Name == "Custom Probe" {
+		if item.Name == "Test Observatory" || item.Name == "Custom Probe" {
 			t.Fatalf("extension leaked into the top bar as its own tab: %#v", model.navigation)
 		}
 	}
@@ -360,7 +392,7 @@ func TestExtensionsUseOneStickyMenuAndProtocolV3Surfaces(t *testing.T) {
 		{
 			Config: profile.Connectors[0], Online: true,
 			Manifest: connectorapi.Manifest{
-				ProtocolVersion: connectorapi.ProtocolVersion, ID: "pardot-observatory", Name: "Pardot Observatory", Version: "3.0.0",
+				ProtocolVersion: connectorapi.ProtocolVersion, ID: "test-observatory", Name: "Test Observatory", Version: "3.0.0",
 				Views:    []connectorapi.ViewDescriptor{{ID: "overview", Title: "Overview", Default: true}},
 				Actions:  []connectorapi.ActionDescriptor{{ID: "hostname", Name: "Host name", Inputs: []connectorapi.InputSpec{{ID: "scope", Label: "Scope", Kind: connectorapi.InputText}}}},
 				Sessions: []connectorapi.SessionDescriptor{{ID: "console", Name: "Console"}},
@@ -535,8 +567,8 @@ func TestExtensionCycleRetainsMenuAndSelectedAction(t *testing.T) {
 		Config: profile.Connectors[0], Online: true,
 		Manifest: connectorapi.Manifest{
 			ProtocolVersion: connectorapi.ProtocolVersion,
-			ID:              "pardot-observatory",
-			Name:            "Pardot Observatory",
+			ID:              "test-observatory",
+			Name:            "Test Observatory",
 			Version:         "3.0.0",
 			Views:           []connectorapi.ViewDescriptor{{ID: "overview", Title: "Overview", Default: true}},
 			Actions:         []connectorapi.ActionDescriptor{{ID: "hostname", Name: "Host name"}, {ID: "system", Name: "System information"}},
@@ -863,6 +895,130 @@ func TestNativeCopyModeSelectsCellsAndRestoresInput(t *testing.T) {
 	}
 }
 
+func TestShiftDragStartsCopyWithoutReturningScrollbackToBottom(t *testing.T) {
+	model := NewModel(t.TempDir())
+	model.width, model.height = 80, 20
+	model.sidebar = false
+	id := agentSessionID("codex")
+	session, err := terminalhost.Start(terminalhost.Spec{
+		ID: id, Name: "Codex", Path: "/bin/sh",
+		Args: []string{"-c", "printf 'alpha beta'; sleep 5"},
+		Dir:  model.root,
+	}, 40, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	model.sessions[id] = session
+	model.section, model.page, model.selectedAgent, model.capture = sectionAgents, pageAgent, "codex", true
+	model.sessionScrollY[id] = 3
+
+	model.Update(tea.MouseClickMsg{
+		X: 1, Y: model.topHeight() + embeddedHeaderHeight,
+		Button: tea.MouseLeft, Mod: tea.ModShift,
+	})
+	if !model.copy.Active || !model.copy.Dragging || !model.copy.HasSelection {
+		t.Fatalf("shift-drag did not enter copy selection: %#v", model.copy)
+	}
+	if model.sessionScrollY[id] != 3 {
+		t.Fatalf("shift-drag returned scrollback to live output: y=%d", model.sessionScrollY[id])
+	}
+	model.leaveCopyMode(true)
+}
+
+func TestCopyModePausesAndResumesStreamingOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ConPTY sessions cannot suspend their process tree")
+	}
+	model := NewModel(t.TempDir())
+	id := agentSessionID("codex")
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := terminalhost.Start(terminalhost.Spec{
+		ID: id, Name: "Codex", Path: executable,
+		Args: []string{"-test.run=^TestTerminalChildProcess$"},
+		Dir:  model.root,
+		Env: terminalhost.Environment(os.Environ(),
+			"LISAN_TEST_TERMINAL_CHILD=1",
+			"LISAN_TEST_TERMINAL_STREAM=1",
+		),
+	}, 40, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	model.sessions[id] = session
+	model.section, model.page, model.selectedAgent, model.capture = sectionAgents, pageAgent, "codex", true
+
+	deadline := time.Now().Add(3 * time.Second)
+	for session.ScrollbackLen() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	model.enterCopyMode()
+	if !model.copy.Paused {
+		t.Fatal("copy mode did not pause the producing session")
+	}
+	time.Sleep(30 * time.Millisecond) // allow bytes already in the PTY to drain
+	frozen := session.ScrollbackLen()
+	time.Sleep(75 * time.Millisecond)
+	if got := session.ScrollbackLen(); got != frozen {
+		t.Fatalf("streaming output moved during copy mode: scrollback %d -> %d", frozen, got)
+	}
+
+	model.leaveCopyMode(true)
+	deadline = time.Now().Add(3 * time.Second)
+	for session.ScrollbackLen() <= frozen && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := session.ScrollbackLen(); got <= frozen {
+		t.Fatalf("streaming output did not resume after copy mode: scrollback %d -> %d", frozen, got)
+	}
+}
+
+func TestNeovimThemeCommandAndLiveBackgroundFollowLisanTheme(t *testing.T) {
+	t.Setenv(appconfig.EnvironmentConfig, filepath.Join(t.TempDir(), "config.json"))
+	model := NewModel(t.TempDir())
+	model.themeIndex = 0
+	initial := theme.All[0].NeovimTheme()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := terminalhost.Start(terminalhost.Spec{
+		ID: editorSessionID, Name: "NvChad", Path: executable,
+		Args: []string{"-test.run=^TestTerminalChildProcess$"},
+		Dir:  model.root,
+		Env: terminalhost.Environment(os.Environ(),
+			"LISAN_TEST_TERMINAL_CHILD=1",
+		),
+		Background: lipgloss.Color(initial.Background),
+	}, 40, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	model.sessions[editorSessionID] = session
+
+	model.cycleTheme(1)
+	want := theme.All[1]
+	paired := want.NeovimTheme()
+	if model.themeIndex != 1 {
+		t.Fatalf("theme index = %d, want 1", model.themeIndex)
+	}
+	if !sameColor(session.BackgroundColor(), lipgloss.Color(paired.Background)) {
+		t.Fatalf("NvChad background did not follow %s", want.Name)
+	}
+	lua := nvimThemeLua(paired.Name)
+	if !strings.Contains(lua, `c.theme="bearded-arc"`) || !strings.Contains(lua, "load_all_highlights") {
+		t.Fatalf("unexpected live NvChad theme command: %q", lua)
+	}
+	if startup := nvimThemeStartupCommand(paired.Name); !strings.Contains(startup, lua) || !strings.Contains(startup, "VimEnter") {
+		t.Fatalf("unexpected startup NvChad theme command: %q", startup)
+	}
+}
+
 func waitForSessionText(t *testing.T, session *terminalhost.Session, want string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
@@ -912,6 +1068,14 @@ func TestTerminalChildProcess(t *testing.T) {
 	if os.Getenv("LISAN_TEST_TERMINAL_SCROLLBACK") == "1" {
 		for index := range 20 {
 			_, _ = fmt.Fprintf(os.Stdout, "scroll-line-%02d\r\n", index)
+		}
+		time.Sleep(10 * time.Second)
+		return
+	}
+	if os.Getenv("LISAN_TEST_TERMINAL_STREAM") == "1" {
+		for index := range 200 {
+			_, _ = fmt.Fprintf(os.Stdout, "stream-line-%03d\r\n", index)
+			time.Sleep(5 * time.Millisecond)
 		}
 		time.Sleep(10 * time.Second)
 		return
@@ -1356,12 +1520,14 @@ func TestVimEditCommandEscapesSingleQuote(t *testing.T) {
 
 func TestAgentWorkingDirUsesPreparedWorkspace(t *testing.T) {
 	root := t.TempDir()
-	want := filepath.Join(root, "agents", "codex")
-	if err := os.MkdirAll(want, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if got := agentWorkingDir(root, "codex"); got != want {
-		t.Fatalf("got %q, want %q", got, want)
+	for _, id := range appconfig.AgentIDs() {
+		want := filepath.Join(root, "agents", id)
+		if err := os.MkdirAll(want, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if got := agentWorkingDir(root, id); got != want {
+			t.Fatalf("%s working directory = %q, want %q", id, got, want)
+		}
 	}
 	if got := agentWorkingDir(root, "missing"); got != root {
 		t.Fatalf("missing prepared workspace should fall back to root, got %q", got)
@@ -1371,11 +1537,11 @@ func TestAgentWorkingDirUsesPreparedWorkspace(t *testing.T) {
 func testExtensionProfile() appconfig.Profile {
 	profile := appconfig.ProfileFromPreset(appconfig.Presets[0], time.Now())
 	profile.Connectors = []appconfig.ConnectorConfig{{
-		ID: "pardot-observatory", Name: "Pardot Observatory", Icon: "󰆤", Enabled: true, Managed: true,
-		Bundle: "extensions/pardot-observatory", Version: "3.0.0", Image: "fixture:3", BuildContext: ".",
-		Dockerfile: "extensions/pardot-observatory/Dockerfile", NativeExecutable: "extensions/pardot-observatory/bin/test",
-		Container: "lisan-pardot-observatory", User: "65532:65532", Network: "arrakis-extension-control",
-		Endpoint: "http://lisan-pardot-observatory:7777",
+		ID: "test-observatory", Name: "Test Observatory", Icon: "󰆤", Enabled: true, Managed: true,
+		Bundle: "extensions/test-observatory", Version: "3.0.0", Image: "fixture:3", BuildContext: ".",
+		Dockerfile: "extensions/test-observatory/Dockerfile", NativeExecutable: "extensions/test-observatory/bin/test",
+		Container: "lisan-test-observatory", User: "65532:65532", Network: "arrakis-extension-control",
+		Endpoint: "http://lisan-test-observatory:7777",
 	}}
 	return profile
 }

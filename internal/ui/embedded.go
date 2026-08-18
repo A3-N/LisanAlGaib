@@ -291,6 +291,11 @@ func (m *Model) ensureEditor(path string) tea.Cmd {
 	if resolved != "" {
 		args = []string{"--", resolved}
 	}
+	currentTheme := theme.All[m.themeIndex]
+	pairedTheme := currentTheme.NeovimTheme()
+	if name == "NvChad" {
+		args = append([]string{"--cmd", nvimThemeStartupCommand(pairedTheme.Name)}, args...)
+	}
 	spec := terminalhost.Spec{
 		ID:   editorSessionID,
 		Name: name,
@@ -299,9 +304,21 @@ func (m *Model) ensureEditor(path string) tea.Cmd {
 		Dir:  m.root,
 	}
 	if name == "NvChad" {
-		spec.Background = lipgloss.Color(nvimconfig.ChocolateBackground)
+		spec.Background = lipgloss.Color(pairedTheme.Background)
 	}
 	return m.beginSession(spec)
+}
+
+func nvimThemeLua(name string) string {
+	return fmt.Sprintf("local c=require('nvconfig').base46;c.theme=%q;require('base46').load_all_highlights()", name)
+}
+
+func nvimThemeStartupCommand(name string) string {
+	return "lua vim.api.nvim_create_autocmd('VimEnter',{once=true,callback=function() " + nvimThemeLua(name) + " end})"
+}
+
+func vimThemeCommand(name string) string {
+	return "\x1b:lua " + nvimThemeLua(name) + "\r"
 }
 
 func (m *Model) resolveEditorPath(path string) (string, bool) {
@@ -371,7 +388,7 @@ func terminalSessionNumber(id string) int {
 
 func (m *Model) newTerminalTab() tea.Cmd {
 	if m.copy.Active {
-		m.copy = terminalCopyState{}
+		m.leaveCopyMode(false)
 	}
 	if previous, _ := m.visibleSession(); previous != nil {
 		previous.Blur()
@@ -385,7 +402,7 @@ func (m *Model) newTerminalTab() tea.Cmd {
 
 func (m *Model) splitTerminal(axis terminalSplitAxis) tea.Cmd {
 	if m.copy.Active {
-		m.copy = terminalCopyState{}
+		m.leaveCopyMode(false)
 	}
 	active := m.terminalWorkspace.activeSessionID()
 	if active == "" {
@@ -455,7 +472,7 @@ func (m *Model) activateTerminalTab(index int) tea.Cmd {
 		return nil
 	}
 	if m.copy.Active && m.copy.SessionID != next {
-		m.copy = terminalCopyState{}
+		m.leaveCopyMode(false)
 	}
 	if previous != next {
 		if session := m.sessions[previous]; session != nil {
@@ -490,7 +507,7 @@ func (m *Model) activateTerminalPane(id string, capture bool) bool {
 		return false
 	}
 	if m.copy.Active && m.copy.SessionID != id {
-		m.copy = terminalCopyState{}
+		m.leaveCopyMode(false)
 	}
 	if previous != id {
 		if session := m.sessions[previous]; session != nil {

@@ -99,6 +99,51 @@ func TestUserAssetsFollowActiveProfile(t *testing.T) {
 	}
 }
 
+func TestEverySelectedAgentReceivesRecursiveDropInsWithoutOverwrite(t *testing.T) {
+	sourceRoot := t.TempDir()
+	home := filepath.Join(t.TempDir(), "home")
+	config := filepath.Join(t.TempDir(), "config")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", config)
+
+	profile := appconfig.ProfileFromPreset(appconfig.Presets[3], time.Now())
+	profile.Set(appconfig.Features, "agents", true)
+	for _, id := range appconfig.AgentIDs() {
+		profile.Set(appconfig.Agents, id, true)
+		path := filepath.Join(sourceRoot, "docker", "home", "agents", id, "nested", "config.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(id), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	existing := filepath.Join(home, "agents", "codex", "nested", "config.json")
+	if err := os.MkdirAll(filepath.Dir(existing), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(existing, []byte("user-owned"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SeedUserAssets(sourceRoot, profile); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range appconfig.AgentIDs() {
+		data, err := os.ReadFile(filepath.Join(home, "agents", id, "nested", "config.json"))
+		if err != nil {
+			t.Fatalf("%s nested drop-in was not seeded: %v", id, err)
+		}
+		want := id
+		if id == "codex" {
+			want = "user-owned"
+		}
+		if string(data) != want {
+			t.Fatalf("%s nested drop-in = %q, want %q", id, data, want)
+		}
+	}
+}
+
 func TestInstallRuntimeReplacesStaleFiles(t *testing.T) {
 	root := t.TempDir()
 	makeRuntimeFixture(t, root)

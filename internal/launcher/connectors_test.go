@@ -10,9 +10,9 @@ import (
 )
 
 func TestConnectorRunIsPrivateAndRestricted(t *testing.T) {
-	connector := appconfig.ConnectorConfig{ID: "pardot-observatory", Container: "lisan-pardot-observatory", User: "65532:65532", Network: appconfig.ExtensionControlNetworkName("pardot-observatory"), Image: "fixture:3", Managed: true, Bundle: "extensions/pardot-observatory"}
+	connector := appconfig.ConnectorConfig{ID: "test-extension", Container: "lisan-test-extension", User: "65532:65532", Network: appconfig.ExtensionControlNetworkName("test-extension"), Image: "fixture:3", Managed: true, Bundle: "extensions/test-extension"}
 	joined := strings.Join(connectorRunArguments(connector, "/safe/shared"), " ")
-	for _, expected := range []string{"--network " + appconfig.ExtensionControlNetworkName("pardot-observatory"), "--user 65532:65532", "--restart no", "--read-only", "--cap-drop ALL", "no-new-privileges", "io.lisanalgaib.connector=pardot-observatory", "io.lisanalgaib.connector-config="} {
+	for _, expected := range []string{"--network " + appconfig.ExtensionControlNetworkName("test-extension"), "--user 65532:65532", "--restart no", "--read-only", "--cap-drop ALL", "no-new-privileges", "io.lisanalgaib.connector=test-extension", "io.lisanalgaib.connector-config="} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("connector is missing restriction %q: %s", expected, joined)
 		}

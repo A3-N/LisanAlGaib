@@ -227,6 +227,8 @@ func (m *Model) renderMain(t theme.Theme, width, height int) string {
 			for _, line := range document {
 				lines = append(lines, line.Text)
 			}
+		case pageDisabled:
+			lines = []string{"", "  No pages are enabled.", "", "  Run lisan config and enable Overview or another feature."}
 		}
 	}
 	if len(lines) == 0 {
@@ -820,7 +822,7 @@ func (m *Model) helpLines() []string {
 		"  Enter/Space  expand a category or activate the selected item",
 		"  F2           cycle colour theme",
 		"  r            dynamically rescan configured inventory",
-		"  Esc          close help or return to overview",
+		"  Esc          close help or return to the first enabled page",
 		"  Ctrl-C       quit",
 		"", "  Press ? or Esc to return.",
 	}
@@ -844,7 +846,7 @@ func (m *Model) sectionName() string {
 			return item.Name
 		}
 	}
-	return "Overview"
+	return "No Pages"
 }
 
 func emptyDash(value string) string {

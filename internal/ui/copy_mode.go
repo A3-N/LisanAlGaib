@@ -16,6 +16,7 @@ type terminalCopyState struct {
 	HasSelection  bool
 	Dragging      bool
 	ReturnCapture bool
+	Paused        bool
 }
 
 func (m *Model) enterCopyMode() tea.Cmd {
@@ -42,13 +43,21 @@ func (m *Model) enterCopyMode() tea.Cmd {
 	}
 	m.capture = false
 	_ = session.Blur()
-	m.status = "Copy mode · drag or use arrows to select · Enter/Y copies · Esc cancels"
+	if err := session.Pause(); err == nil {
+		m.copy.Paused = true
+	}
+	m.status = "Copy mode · output paused · drag or use arrows to select · Enter/Y copies · Esc cancels"
 	return nil
 }
 
 func (m *Model) leaveCopyMode(restoreCapture bool) {
 	state := m.copy
 	m.copy = terminalCopyState{}
+	if state.Paused {
+		if session := m.sessions[state.SessionID]; session != nil {
+			_ = session.Resume()
+		}
+	}
 	if !restoreCapture || !state.ReturnCapture {
 		return
 	}

@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+source_root=${1:?agent template directory is required}
+destination_root=${2:?agent destination directory is required}
+
+if [ ! -d "$source_root" ]; then
+  exit 0
+fi
+
+if [ -n "$(find "$source_root" ! -type d ! -type f -print -quit)" ]; then
+  echo "lisan-seed-agent-assets: agent templates may contain only directories and regular files" >&2
+  exit 1
+fi
+
+mkdir -p "$destination_root"
+
+# Merge every agent template recursively. Existing files belong to the user
+# and are never replaced; adding a new drop-in to an existing image template
+# makes it appear on the next container start, including in persistent homes.
+cp -a -n "$source_root/." "$destination_root/"

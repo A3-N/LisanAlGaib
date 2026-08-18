@@ -5,11 +5,7 @@ template=/usr/local/share/lisan/home
 nvim_template=/usr/local/share/lisan/nvim
 
 mkdir -p \
-  /home/fremen/agents/codex \
-  /home/fremen/agents/opencode \
-  /home/fremen/agents/kimi \
-  /home/fremen/agents/claude \
-  /home/fremen/agents/omp \
+  /home/fremen/agents \
   /home/fremen/projects
 
 seed_file() {
@@ -19,12 +15,7 @@ seed_file() {
   fi
 }
 
-seed_file agents/README.md
-seed_file agents/codex/AGENTS.md
-seed_file agents/opencode/AGENTS.md
-seed_file agents/kimi/AGENTS.md
-seed_file agents/claude/CLAUDE.md
-seed_file agents/omp/AGENTS.md
+/usr/local/bin/lisan-seed-agent-assets "$template/agents" /home/fremen/agents
 if command -v fish >/dev/null 2>&1; then
   mkdir -p /home/fremen/.config/fish/conf.d
   seed_file .config/fish/config.fish

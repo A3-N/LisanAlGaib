@@ -140,7 +140,7 @@ func buildBool(value bool) string {
 func dockerBuildSignature(runtimeRoot string, plan dockerBuildPlan) (string, error) {
 	hash := sha256.New()
 	fmt.Fprintf(hash, "%#v\n", plan)
-	paths := []string{".dockerignore", "Dockerfile", "go.mod", "go.sum", "cmd", "internal", "docker/lisan-entrypoint", "docker/nvim", "docker/home"}
+	paths := []string{".dockerignore", "Dockerfile", "go.mod", "go.sum", "cmd", "internal", "docker/lisan-entrypoint", "docker/lisan-seed-agent-assets", "docker/nvim", "docker/home"}
 	if err := writeRuntimeFingerprint(hash, runtimeRoot, paths); err != nil {
 		return "", err
 	}

@@ -133,6 +133,95 @@ func TestDockerNvChadSelectionSurvivesAnExistingHomeVolume(t *testing.T) {
 	}
 }
 
+func TestDockerAgentTemplatesAreRecursivePreservingDropIns(t *testing.T) {
+	root := filepath.Join("..", "..")
+	script := filepath.Join(root, "docker", "lisan-seed-agent-assets")
+	source := filepath.Join(t.TempDir(), "templates")
+	destination := filepath.Join(t.TempDir(), "agents")
+
+	for _, id := range appconfig.AgentIDs() {
+		path := filepath.Join(source, id, "nested", "config.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(id), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	existing := filepath.Join(destination, "opencode", "nested", "config.json")
+	if err := os.MkdirAll(filepath.Dir(existing), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(existing, []byte("user-owned"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	added := filepath.Join(source, "opencode", "nested", "deeper", "drop-in.json")
+	if err := os.MkdirAll(filepath.Dir(added), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(added, []byte("new-template"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	command := exec.Command("/bin/sh", script, source, destination)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("seed Docker agent templates: %v: %s", err, output)
+	}
+	for _, id := range appconfig.AgentIDs() {
+		data, err := os.ReadFile(filepath.Join(destination, id, "nested", "config.json"))
+		if err != nil {
+			t.Fatalf("%s nested drop-in was not copied: %v", id, err)
+		}
+		want := id
+		if id == "opencode" {
+			want = "user-owned"
+		}
+		if string(data) != want {
+			t.Fatalf("%s nested drop-in = %q, want %q", id, data, want)
+		}
+	}
+	if data, err := os.ReadFile(filepath.Join(destination, "opencode", "nested", "deeper", "drop-in.json")); err != nil || string(data) != "new-template" {
+		t.Fatalf("new nested drop-in was not merged into an existing agent directory: %q %v", data, err)
+	}
+
+	dockerfile, err := os.ReadFile(filepath.Join(root, "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entrypoint, err := os.ReadFile(filepath.Join(root, "docker", "lisan-entrypoint"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(dockerfile), "COPY docker/home /usr/local/share/lisan/home") ||
+		!strings.Contains(string(dockerfile), "COPY docker/lisan-seed-agent-assets /usr/local/bin/lisan-seed-agent-assets") ||
+		!strings.Contains(string(entrypoint), `lisan-seed-agent-assets "$template/agents" /home/fremen/agents`) {
+		t.Fatal("Docker runtime does not install and invoke the recursive agent seeder")
+	}
+}
+
+func TestDockerAgentTemplateDirectoriesMatchCatalog(t *testing.T) {
+	root := filepath.Join("..", "..", "docker", "home", "agents")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directories := map[string]bool{}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			directories[entry.Name()] = true
+		}
+	}
+	for _, id := range appconfig.AgentIDs() {
+		if !directories[id] {
+			t.Errorf("agent %q has no Docker drop-in directory", id)
+		}
+		delete(directories, id)
+	}
+	if len(directories) != 0 {
+		t.Fatalf("Docker agent drop-in directories are not selectable: %#v", directories)
+	}
+}
+
 func TestDockerFishPromptIsManagedAcrossExistingHomeVolumes(t *testing.T) {
 	root := filepath.Join("..", "..")
 	entrypoint, err := os.ReadFile(filepath.Join(root, "docker", "lisan-entrypoint"))
@@ -342,66 +431,15 @@ func TestDockerfilePinsEveryAgentPayloadWithoutManifestTooling(t *testing.T) {
 func TestDockerfilesPinPatchedMultiArchitectureBaseImages(t *testing.T) {
 	const goBuilder = "FROM golang:1.26.5-bookworm@sha256:6c5605ab3a9a9fb3c4eafe5b3d63cdbf3881caf113262b67862547b54a9db599"
 	const workspace = "FROM ubuntu:26.04@sha256:678c6550cc43645e08669028bc177f50be4e7c5b8cca677067b1914d4afc7a03"
-	for _, test := range []struct {
-		path     string
-		required []string
-	}{
-		{filepath.Join("..", "..", "Dockerfile"), []string{goBuilder, workspace}},
-		{filepath.Join("..", "..", "extensions", "pardot-observatory", "Dockerfile"), []string{goBuilder, "FROM scratch"}},
-	} {
-		data, err := os.ReadFile(test.path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, required := range test.required {
-			if !strings.Contains(string(data), required) {
-				t.Fatalf("%s does not pin %q", test.path, required)
-			}
-		}
-	}
-}
-
-func TestConnectorDockerfileCopiesOnlyItsDependencyPackages(t *testing.T) {
-	root := filepath.Join("..", "..")
-	dockerfilePath := filepath.Join(root, "extensions", "pardot-observatory", "Dockerfile")
-	data, err := os.ReadFile(dockerfilePath)
+	path := filepath.Join("..", "..", "Dockerfile")
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dockerfile := string(data)
-	if strings.Contains(dockerfile, "COPY internal ./internal") {
-		t.Fatal("connector build copies every application package")
-	}
-	command := exec.Command("go", "list", "-deps", "-f", "{{.ImportPath}}", "./extensions/pardot-observatory/cmd/pardot-observatory")
-	command.Dir = root
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("resolve extension dependency closure: %v: %s", err, output)
-	}
-	required := map[string]bool{}
-	for _, importPath := range strings.Fields(string(output)) {
-		const prefix = "lisanalgaib/internal/"
-		if strings.HasPrefix(importPath, prefix) {
-			required[strings.SplitN(strings.TrimPrefix(importPath, prefix), "/", 2)[0]] = true
+	for _, required := range []string{goBuilder, workspace} {
+		if !strings.Contains(string(data), required) {
+			t.Fatalf("%s does not pin %q", path, required)
 		}
-	}
-	for dependency := range required {
-		if !strings.Contains(dockerfile, "COPY internal/"+dependency+" ./internal/"+dependency) {
-			t.Fatalf("connector build omits dependency package %s", dependency)
-		}
-	}
-	for _, line := range strings.Split(dockerfile, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 2 || fields[0] != "COPY" || !strings.HasPrefix(fields[1], "internal/") {
-			continue
-		}
-		dependency := strings.SplitN(strings.TrimPrefix(fields[1], "internal/"), "/", 2)[0]
-		if !required[dependency] {
-			t.Fatalf("connector build copies unused internal package %s", dependency)
-		}
-	}
-	if !strings.Contains(dockerfile, `ENTRYPOINT ["/pardot-observatory"`) {
-		t.Fatal("reference extension does not run its independent service executable")
 	}
 }
 
@@ -475,6 +513,29 @@ func TestDockerBuildSignatureTracksPlanAndInputs(t *testing.T) {
 	}
 }
 
+func TestAgentConfigDropInInvalidatesDockerBuildSignature(t *testing.T) {
+	root := dockerBuildFixture(t)
+	profile := appconfig.ProfileFromPreset(appconfig.Presets[0], time.Now())
+	before, err := dockerBuildSignature(root, resolveDockerBuildPlan(profile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(root, "docker", "home", "agents", "opencode", "opencode.json")
+	if err := os.MkdirAll(filepath.Dir(config), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	after, err := dockerBuildSignature(root, resolveDockerBuildPlan(profile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before == after {
+		t.Fatal("agent configuration drop-in did not invalidate the Docker image signature")
+	}
+}
+
 func dockerBuildFixture(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -483,7 +544,7 @@ func dockerBuildFixture(t *testing.T) string {
 			t.Fatal(err)
 		}
 	}
-	for _, file := range []string{".dockerignore", "Dockerfile", "go.mod", "go.sum", "docker/lisan-entrypoint"} {
+	for _, file := range []string{".dockerignore", "Dockerfile", "go.mod", "go.sum", "docker/lisan-entrypoint", "docker/lisan-seed-agent-assets"} {
 		path := filepath.Join(root, file)
 		if err := os.WriteFile(path, []byte(file+"\n"), 0o600); err != nil {
 			t.Fatal(err)
